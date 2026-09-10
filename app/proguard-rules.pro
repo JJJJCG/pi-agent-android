@@ -13,6 +13,13 @@
 -dontwarn retrofit2.**
 -keepattributes Signature, Exceptions
 
+# Google Tink 的字节码引用了 errorprone 的编译期注解（compileOnly，不进 APK）。
+# 这 4 个类运行时根本用不到，R8 严格模式下需显式豁免，否则 minify 直接失败。
+-dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
+-dontwarn com.google.errorprone.annotations.CheckReturnValue
+-dontwarn com.google.errorprone.annotations.Immutable
+-dontwarn com.google.errorprone.annotations.RestrictedApi
+
 # ---------------------------------------------------------------- sherpa-onnx
 # JNI 是按「类名 + 方法名 + 字段名」反查的，混淆掉任何一个都会在运行时崩，
 # 所以这个包必须整体保留（包括 data class 的字段和 external 方法）。
