@@ -21,12 +21,12 @@
 
 ```
 界面层  ──►  VoiceSession（编排）  ──►  端侧：VAD / KWS（sherpa-onnx，可选）
-                                   └─►  云端：ASR / TTS（OpenAI 兼容，可选）
+                                   └─►  云端：ASR / TTS（小米 MiMo，可选）
                                    └─►  pi  ：PiRepository（必需）
 ```
 
 - **没有 `libsherpa-onnx-jni.so`** → 麦克风按钮变灰并说明原因，唤醒开不了；文本对话和朗读照常。
-- **没有配语音端点** → 朗读/识别报「语音端点未配置」；文本对话照常。
+- **没填 MiMo 的 API Key** → 识别和朗读都报「语音未配置」；文本对话照常。
 - **没有配 pi 地址** → 提示去设置页；其余功能照常。
 
 所以拿到工程**第一件事就能编译运行**，再按需补资源。
@@ -127,15 +127,42 @@ jq -r .token /root/.pi/agent/http-bridge.json    # 复制这个 token
 App → 设置：
 
 - **pi 地址 / token / 超时** → 点「探活」确认，再「保存」
-- **识别（ASR）** → 选预设（OpenAI 官方 / 自建 / 自定义）再按需改模型名，
-  点「试识别」录一句，看能不能正确出字
-- **朗读（TTS）** → 默认跟识别共用同一服务商；要换成另一家就把
-  「与识别使用同一服务商」关掉，单独填地址和 token，点「试听」听一句真话
+- **语音（小米 MiMo）** → 填 MiMo 控制台的 API Key（识别和朗读共用这一个）。
+  点「试识别」录一句看能不能出字，再点「试听」听一句真话
 - **唤醒** → 先「保存」，再打开开关（首次会要录音权限）
 
-> 识别和朗读是两套独立端点，可以用不同服务商 —— 比如识别走本地的
-> faster-whisper、朗读走云端的 TTS。设置里改了地址或 token 会立刻生效，
-> 不用重启 App（两边的客户端缓存是分开的）。
+### 2.3.1 语音用的是小米 MiMo
+
+识别和朗读都走 MiMo 一家，一个 API Key 同时管两边 —— 因为 MiMo 把两个能力都挂在
+**同一个 `chat/completions` 接口**上。这点和 OpenAI 很不一样，值得先说清楚：
+
+| | OpenAI | MiMo |
+|---|---|---|
+| 识别端点 | `POST /audio/transcriptions` | `POST /chat/completions` |
+| 朗读端点 | `POST /audio/speech` | `POST /chat/completions` |
+| 识别怎么传音频 | multipart 表单 | `messages[].input_audio.data`，base64 data URI |
+| 识别结果在哪 | `text` | `choices[0].message.content` |
+| 朗读的文本放哪 | 请求体 `input` | **`assistant` 消息的 content** |
+| 朗读音频在哪 | 响应体字节流 | `choices[0].message.audio.data`，base64 |
+| 语速 | `speed` 数值 | 只能写进自然语言指令 |
+
+**调 `/audio/transcriptions` 或 `/audio/speech` 会直接 404。** MiMo 官方文档里
+「OpenAI API 兼容」指的是复用了 OpenAI 的**聊天补全**形态（能用 openai SDK 指过去），
+不是它的语音端点。
+
+几个由此而来的取舍：
+
+- **识别不能带提示词**。MiMo 明确要求 `user` 的 `content` 里只能有 `input_audio`，
+  混进 `text` 会报错（和一般多模态模型相反）。所以设置里没有「识别提示词」这一项，
+  提升专有名词识别率只能靠把「语种」定死。
+- **朗读的语速是折算的**。MiMo 没有数字语速参数，`ttsSpeed` 会被折成一句
+  「语速稍快」这类自然语言，拼进风格指令。要精确控制就自己在「风格指令」里写细一点。
+- **鉴权头带了两个**。MiMo 的两份官方示例不一致：curl 写 `api-key`，Python(OpenAI SDK)
+  走 `Authorization`。代码里两个都发（值相同不会冲突），省得在真机上试错。
+- **格式默认 wav**。非流式下 wav 拿到的是完整容器，直接落盘即可；流式才要求 pcm16。
+
+> 地址默认 `https://api.xiaomimimo.com/v1`，只写域名会自动补 `/v1`。
+> Token Plan 用户填订阅页给的区域地址。改地址或 Key 会立刻生效，不用重启 App。
 
 ---
 
@@ -186,7 +213,7 @@ com.pi.assistant/
     ToneCue.kt               唤醒提示音
   data/
     pi/                      pi bridge 客户端 + 错误状态机（M1 的灵魂）
-    speech/                  OpenAI 兼容 ASR / TTS
+    speech/                  小米 MiMo 语音：识别 + 合成（同一个 chat/completions）
     prefs/SettingsStore.kt   全部配置（JSON 一条存进 Keystore 加密）
     local/                   Room 历史
   voice/
@@ -232,15 +259,10 @@ JNI 是按「包名 + 类名 + 方法名」和「data class 的字段名」反�
 **5. 唤醒只由用户手动开。** Android 12+ 本来也不允许后台自启；
 常驻通知里必须能一键停；设置页明确写了「麦克风将常驻采集」。
 
-**6. 全部参数可配。** 兼容端点的模型名和字段名差异极大，预设只是快捷填充，
-填完你还能改 —— 硬编码必然返工。
-
-**6.1 ASR 与 TTS 是两套独立端点。** 两边各有自己的地址、token、预设和客户端缓存。
-`ttsShareAsr` 默认 `true`，让朗读复用识别的端点（同一家服务商是常态，不必填两遍）；
-关掉就能填第二家。预设也只填它管的那一侧，不会把另一边手动配好的覆盖掉。
-
-> 旧版本只有一套共用的 `speechBaseUrl` / `speechToken`，升级后靠 `@SerialName`
-> 把它们绑到 ASR 那一侧，已填的地址和 token 不会丢。
+**6. 语音只支持 MiMo 一家。** 识别和朗读共用一份地址与 Key，配置收进一个嵌套的
+`MimoSpeech` 对象（见 §2.3.1）。做成嵌套而不是平铺进 `PiSettings` 是有意的：
+字段名换过一批，老配置里那些 OpenAI / 百炼的模型名不会被带进来 —— 模型名对不上时
+服务端只回一个含糊的错误，用户很难自己发现。pi 的地址和 token 不受影响。
 
 **7. 所有 `ResponseBody.string()` 都在 `Dispatchers.IO` 里。** 它做的是网络 I/O，
 在主线程调直接 `NetworkOnMainThreadException`。
@@ -254,7 +276,14 @@ JNI 是按「包名 + 类名 + 方法名」和「data class 的字段名」反�
 
 - **端侧 ASR 降级没做**：文档里提到网络挂了降级到 SenseVoice，本工程未实现。
   断网时语音识别直接报错，文本对话不受影响。
-- **长文本 TTS 未做流式分段**：目前整段合成，首字延迟偏高。文档列为二期优化。
+- **长文本 TTS 未做流式分段**：目前整段合成，首字延迟偏高。MiMo 已支持低延迟流式
+  （流式要 `pcm16` 再自己拼容器），但这里没用 —— 好处是不用做容器拼接，代价是首字延迟。
+- **识别不能带提示词**：MiMo 要求 `user` 的 content 里只能有 `input_audio`，
+  混进 `text` 会报错，所以热词只能靠把语种定死（详见 §2.3.1）。
+- **朗读语速是折算的**：MiMo 没有数字语速参数，`ttsSpeed` 会折成自然语言指令，
+  不是精确倍率。
+- **只支持 MiMo**：不再支持 OpenAI 或其它兼容端点，要换服务商得改
+  `SpeechRepository` 里的请求构造。
 - **没有打断接口**：pi 只有一问一答，唤醒后中途改口要等它答完。
 - **厂商保活只能尽力而为**：代码侧只做到引导跳电池优化白名单，
   小米/华为/OPPO/vivo 的自启动与后台白名单仍需手动设置。

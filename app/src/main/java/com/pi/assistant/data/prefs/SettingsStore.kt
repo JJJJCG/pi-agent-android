@@ -9,7 +9,6 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -18,56 +17,47 @@ import javax.inject.Singleton
 @Serializable
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
-/** 语音端点的三档预设。各家字段名/模型名差异很大，所以参数必须可配，预设只是快捷填充。 */
+/**
+ * 语音相关的全部配置。
+ *
+ * 只支持小米 MiMo 一家 —— 它把语音识别和合成都挂在同一个 `/chat/completions` 上，
+ * `base_url` 和 API Key 也是同一份，所以不再分「识别侧 / 朗读侧」两套端点：
+ * 一个地址、一个 key 同时管两边。
+ *
+ * 做成嵌套对象而不是平铺进 [PiSettings]：字段名换了一批，老配置里那些
+ * OpenAI / 百炼的模型名不会被带进来。这点很关键 —— 模型名对不上时服务端只会
+ * 返回一个含糊的错误，用户很难自己发现。
+ */
 @Serializable
-enum class SpeechPreset {
-    OPENAI,
-    SELF_HOSTED,
-    CUSTOM;
+data class MimoSpeech(
+    val baseUrl: String = DEFAULT_BASE_URL,
+    /** MiMo 控制台的 API Key，识别和朗读共用。 */
+    val token: String = "",
 
-    val label: String
-        get() = when (this) {
-            OPENAI -> "OpenAI 官方"
-            SELF_HOSTED -> "自建兼容端点"
-            CUSTOM -> "自定义"
-        }
+    // ---- 识别
+    val asrModel: String = "mimo-v2.5-asr",
+    /** auto / zh / en。明确语种能提升识别效果，所以默认给 zh 之外的选项可改。 */
+    val asrLanguage: String = "auto",
 
-    /**
-     * 预设只负责把「它管的那一侧」的地址和模型填好，另一侧不动 ——
-     * ASR 和 TTS 可以用两家不同的服务商，一个预设不该同时覆盖两边。
-     * CUSTOM 一律返回 null，表示「不预设，保留用户已经填的」。
-     */
-    val baseUrl: String?
-        get() = when (this) {
-            OPENAI -> "https://api.openai.com/v1"
-            SELF_HOSTED -> DEFAULT_SELF_HOSTED_SPEECH_URL
-            CUSTOM -> null
-        }
+    // ---- 朗读
+    val ttsModel: String = "mimo-v2.5-tts",
+    /** 预置音色 ID：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 / Mia / Chloe / Milo / Dean */
+    val ttsVoice: String = "mimo_default",
+    /** 自然语言风格指令，会作为 user 消息发出去（合成文本放 assistant）。 */
+    val ttsStylePrompt: String = "",
+    val ttsSpeed: Float = 1.0f,
+    /** MiMo 非流式用 wav —— 拿到的就是完整容器，不用再解码。 */
+    val ttsFormat: String = "wav",
+    val autoSpeak: Boolean = false,
+) {
+    val asrConfigured: Boolean
+        get() = baseUrl.isNotBlank() && token.isNotBlank() && asrModel.isNotBlank()
 
-    val asrModel: String?
-        get() = when (this) {
-            OPENAI -> "gpt-4o-transcribe"
-            SELF_HOSTED -> "Systran/faster-whisper-large-v3"
-            CUSTOM -> null
-        }
-
-    val ttsModel: String?
-        get() = when (this) {
-            OPENAI -> "gpt-4o-mini-tts"
-            SELF_HOSTED -> "kokoro"
-            CUSTOM -> null
-        }
-
-    val ttsVoice: String?
-        get() = when (this) {
-            OPENAI -> "alloy"
-            SELF_HOSTED -> "af_heart"
-            CUSTOM -> null
-        }
+    val ttsConfigured: Boolean
+        get() = baseUrl.isNotBlank() && token.isNotBlank() && ttsModel.isNotBlank()
 
     companion object {
-        /** 自建端点默认指向 pi 机器上常见的本地部署地址，用户按需改。 */
-        const val DEFAULT_SELF_HOSTED_SPEECH_URL = "http://192.168.31.145:9000/v1"
+        const val DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
     }
 }
 
@@ -86,32 +76,8 @@ data class PiSettings(
     val timeoutSec: Int = DEFAULT_TIMEOUT_SEC,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
 
-    // ---- 语音端点（OpenAI 兼容的 ASR / TTS）
-    //
-    // 两侧各自独立配置，可以用两家不同的服务商（例如识别走本地 whisper、
-    // 朗读走云端的 TTS）。早先这里只有一套共用的 speechPreset / speechBaseUrl /
-    // speechToken —— 用 @SerialName 把旧 key 绑到 ASR 这一侧，升级后已填的地址和
-    // token 原样还在；TTS 默认跟着 ASR 走，行为跟以前完全一致。
-    @SerialName("speechPreset")
-    val asrPreset: SpeechPreset = SpeechPreset.OPENAI,
-    @SerialName("speechBaseUrl")
-    val asrBaseUrl: String = DEFAULT_SPEECH_BASE_URL,
-    @SerialName("speechToken")
-    val asrToken: String = "",
-    val asrModel: String = "gpt-4o-transcribe",
-    val asrLanguage: String = "zh",
-    val asrPrompt: String = "",
-
-    /** 同一家服务商是常态，默认让 TTS 复用 ASR 的地址与 token，别逼人填两遍。 */
-    val ttsShareAsr: Boolean = true,
-    val ttsPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val ttsBaseUrl: String = "",
-    val ttsToken: String = "",
-    val ttsModel: String = "gpt-4o-mini-tts",
-    val ttsVoice: String = "alloy",
-    val ttsSpeed: Float = 1.0f,
-    val ttsFormat: String = "mp3",
-    val autoSpeak: Boolean = false,
+    // ---- 语音（识别 + 朗读，都是小米 MiMo 一家）
+    val speech: MimoSpeech = MimoSpeech(),
 
     // ---- VAD 断句
     val vadThreshold: Float = 0.5f,
@@ -131,32 +97,12 @@ data class PiSettings(
     /** 地址填了才发得出去请求。 */
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
-    // ---- 语音端点实际生效值：TTS 开了共用就跟着 ASR 走
-
-    val ttsEffectivePreset: SpeechPreset get() = if (ttsShareAsr) asrPreset else ttsPreset
-    val ttsEffectiveBaseUrl: String get() = if (ttsShareAsr) asrBaseUrl else ttsBaseUrl
-    val ttsEffectiveToken: String get() = if (ttsShareAsr) asrToken else ttsToken
-
-    /** 识别侧可用：地址和模型名都齐了。 */
-    val asrConfigured: Boolean get() = asrBaseUrl.isNotBlank() && asrModel.isNotBlank()
-
-    /** 朗读侧可用：看的是生效后的端点（共用时就是 ASR 那套）。 */
-    val ttsConfigured: Boolean
-        get() = ttsEffectiveBaseUrl.isNotBlank() && ttsModel.isNotBlank()
-
-    /** 两侧确实指向了不同服务商 —— 设置页据此提示「正在用两家」。 */
-    val speechProvidersDiffer: Boolean
-        get() = !ttsShareAsr &&
-            ttsBaseUrl.isNotBlank() &&
-            !ttsBaseUrl.equals(asrBaseUrl, ignoreCase = true)
-
     /** 唤醒词，逗号分隔，允许配多个。 */
     val wakeKeywords: List<String>
         get() = wakeKeyword.split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
 
     companion object {
         const val DEFAULT_BASE_URL = "http://192.168.31.145:9901"
-        const val DEFAULT_SPEECH_BASE_URL = "https://api.openai.com/v1"
         const val DEFAULT_TIMEOUT_SEC = 120
         const val TIMEOUT_MIN = 1
         const val TIMEOUT_MAX = 3600
@@ -189,11 +135,12 @@ class SettingsStore @Inject constructor(
 
     fun save(settings: PiSettings) {
         // 地址规范化统一收口在这里 —— 这样连只改一个开关的 updateThemeMode /
-        // updateWakeEnabled 也会顺带把三个地址修好，不会漏。
+        // updateWakeEnabled 也会顺带把地址修好，不会漏。
         val normalized = settings.copy(
             baseUrl = normalizeBaseUrl(settings.baseUrl),
-            asrBaseUrl = normalizeSpeechBaseUrl(settings.asrBaseUrl),
-            ttsBaseUrl = normalizeSpeechBaseUrl(settings.ttsBaseUrl),
+            speech = settings.speech.copy(
+                baseUrl = normalizeSpeechBaseUrl(settings.speech.baseUrl),
+            ),
         )
         prefs.edit().putString(KEY, json.encodeToString(PiSettings.serializer(), normalized)).apply()
         _state.value = normalized
@@ -248,9 +195,9 @@ class SettingsStore @Inject constructor(
         }
 
         /**
-         * 语音端点按 OpenAI 的约定，「base」是要带 `/v1` 的。
-         * 用户如果只写 `https://api.openai.com`，这里自动补 `/v1`；
-         * 已经写了路径的（自建端点常有自定义前缀）就原样尊重。
+         * MiMo 的 base 按 OpenAI 的约定要带 `/v1`（`https://api.xiaomimimo.com/v1`）。
+         * 只写域名就自动补上；已经带路径的原样尊重 —— Token Plan 用户会填
+         * 订阅页给的区域地址，那些也自带 `/v1`。
          */
         fun normalizeSpeechBaseUrl(raw: String): String {
             val s = normalizeBaseUrl(raw)

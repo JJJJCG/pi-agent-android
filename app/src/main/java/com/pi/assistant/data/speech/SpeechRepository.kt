@@ -1,7 +1,9 @@
 package com.pi.assistant.data.speech
 
 import android.content.Context
+import android.util.Base64
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import com.pi.assistant.data.prefs.MimoSpeech
 import com.pi.assistant.data.prefs.SettingsStore
 import com.pi.assistant.util.MarkdownStripper
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -10,193 +12,224 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
-import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Retrofit
 import java.io.File
+import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** 语音端点调用的结果，异常一律不外泄。 */
+/** 语音调用结果，异常一律不外泄。 */
 sealed interface SpeechResult<out T> {
     data class Ok<T>(val value: T) : SpeechResult<T>
     data class Failed(val message: String) : SpeechResult<Nothing>
 }
 
+/**
+ * 语音识别与合成，都走小米 MiMo。
+ *
+ * 两条链路共用同一个 `chat/completions` 端点和同一份 key，所以客户端只缓存一份。
+ */
 @Singleton
 class SpeechRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settings: SettingsStore,
 ) {
 
+    // ------------------------------------------------------------------ 识别
+
     /**
      * 传 16k/mono/16bit 的 WAV，拿识别文本。
-     * 文件名带 `.wav` 扩展名 —— 不少兼容端点是靠扩展名猜格式的。
+     *
+     * 音频要整个 base64 进 JSON —— MiMo 只收 wav / mp3，编码后上限 10MB。
+     * 我们的录音算 60 秒也才 1.9MB（base64 后 2.6MB），离上限很远。
      */
     suspend fun transcribe(wav: File): SpeechResult<String> = withContext(Dispatchers.IO) {
-        val snapshot = settings.current
-        if (!snapshot.asrConfigured) {
-            return@withContext SpeechResult.Failed("ASR 端点未配置：去设置页把「识别」那一块的地址和模型填上")
+        val speech = settings.current.speech
+        if (!speech.asrConfigured) {
+            return@withContext SpeechResult.Failed("语音未配置：去设置页填 MiMo 的 API Key")
         }
-        val api = apiFor(asrHolder, snapshot.asrBaseUrl, snapshot.asrToken)
-            ?: return@withContext SpeechResult.Failed("ASR 地址不合法：${snapshot.asrBaseUrl}")
         if (!wav.exists() || wav.length() == 0L) {
             return@withContext SpeechResult.Failed("录音文件是空的")
         }
 
-        val part = MultipartBody.Part.createFormData(
-            "file",
-            wav.name,
-            wav.asRequestBody("audio/wav".toMediaType()),
+        val base64 = try {
+            Base64.encodeToString(wav.readBytes(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            return@withContext SpeechResult.Failed("读录音文件失败：${e.message ?: e::class.java.simpleName}")
+        }
+
+        val body = MimoAsrRequest(
+            model = speech.asrModel,
+            messages = listOf(
+                MimoAsrMessage(
+                    role = "user",
+                    content = listOf(
+                        // type 固定 input_audio，且 content 里不能再有别的类型
+                        MimoAsrContent(
+                            type = "input_audio",
+                            input_audio = MimoInputAudio(data = "data:audio/wav;base64,$base64"),
+                        )
+                    ),
+                )
+            ),
+            asr_options = MimoAsrOptions(
+                language = speech.asrLanguage.ifBlank { "auto" },
+            ),
         )
 
+        val speechApi = api(speech)
+            ?: return@withContext SpeechResult.Failed("MiMo 地址不合法：${speech.baseUrl}")
+
         val response = try {
-            api.transcribe(
-                file = part,
-                model = snapshot.asrModel.toPlainBody(),
-                language = snapshot.asrLanguage.takeIf { it.isNotBlank() }?.toPlainBody(),
-                prompt = snapshot.asrPrompt.takeIf { it.isNotBlank() }?.toPlainBody(),
-            )
+            speechApi.transcribe(body)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             return@withContext SpeechResult.Failed(
-                "ASR 请求失败 @${snapshot.asrBaseUrl.endpointLabel()}：${e.message ?: e::class.java.simpleName}"
+                "识别请求失败 @${speech.baseUrl.endpointLabel()}：${e.message ?: e::class.java.simpleName}"
             )
         }
 
         if (!response.isSuccessful) {
-            val body = runCatching { response.errorBody()?.string() }.getOrNull()
             return@withContext SpeechResult.Failed(
-                "ASR HTTP ${response.code()} @${snapshot.asrBaseUrl.endpointLabel()}：${body?.take(200).orEmpty()}"
+                httpError("识别", speech.baseUrl, response.code(), response.errorBody()?.string())
             )
         }
 
-        val text = response.body()?.text?.trim().orEmpty()
-        if (text.isEmpty()) SpeechResult.Failed("ASR 返回了空文本") else SpeechResult.Ok(text)
+        val text = response.body()
+            ?.choices?.firstOrNull()
+            ?.message?.content?.trim().orEmpty()
+
+        if (text.isEmpty()) {
+            SpeechResult.Failed("识别返回了空文本（模型名或音频格式可能不对）")
+        } else {
+            SpeechResult.Ok(text)
+        }
     }
+
+    // ------------------------------------------------------------------ 朗读
 
     /**
      * 文字转音频，返回落盘的临时文件。
      * 长文本先按句切分并发合成是二期的事，这里整段来，先保证能用。
      */
     suspend fun synthesize(text: String): SpeechResult<File> = withContext(Dispatchers.IO) {
-        val snapshot = settings.current
-        if (!snapshot.ttsConfigured) {
-            val detail = if (snapshot.ttsShareAsr) {
-                "朗读现在和识别共用服务商，检查识别侧地址 + 朗读模型名"
-            } else {
-                "去设置页把「朗读」那一块的地址和模型填上"
-            }
-            return@withContext SpeechResult.Failed("TTS 端点未配置：$detail")
+        val speech = settings.current.speech
+        if (!speech.ttsConfigured) {
+            return@withContext SpeechResult.Failed("语音未配置：去设置页填 MiMo 的 API Key")
         }
-        val api = apiFor(ttsHolder, snapshot.ttsEffectiveBaseUrl, snapshot.ttsEffectiveToken)
-            ?: return@withContext SpeechResult.Failed("TTS 地址不合法：${snapshot.ttsEffectiveBaseUrl}")
 
         val plain = MarkdownStripper.strip(text)
         if (plain.isBlank()) return@withContext SpeechResult.Failed("这段内容没有可朗读的文字")
 
+        // 兼容端点的输入上限差别很大，先截一刀，宁可少读也别整个 400
+        val clipped = plain.take(MAX_TTS_CHARS)
+
+        /*
+         * 两条容易踩的规则（照文档）：
+         *   · 待合成文本必须放 **assistant** 消息，放 user 会被当成指令、不出声
+         *   · user 消息是可选的自然语言风格指令，用来控制语气 / 方言 / 语速
+         */
+        val messages = buildList {
+            // MiMo 没有数字化的语速参数，语速只能写进自然语言指令里，
+            // 所以把 ttsSpeed 折算成一句话拼上去，别让这个设置项在 MiMo 下失效。
+            val instruction = listOfNotNull(
+                speech.ttsStylePrompt.trim().takeIf { it.isNotEmpty() },
+                speech.ttsSpeed.toPaceHint(),
+            ).joinToString("，")
+
+            if (instruction.isNotEmpty()) add(MimoChatMessage(role = "user", content = instruction))
+            add(MimoChatMessage(role = "assistant", content = clipped))
+        }
+
+        val body = MimoTtsRequest(
+            model = speech.ttsModel,
+            messages = messages,
+            audio = MimoAudioSpec(
+                format = speech.ttsFormat.ifBlank { "wav" },
+                voice = speech.ttsVoice.trim().takeIf { it.isNotEmpty() },
+            ),
+        )
+
+        val speechApi = api(speech)
+            ?: return@withContext SpeechResult.Failed("MiMo 地址不合法：${speech.baseUrl}")
+
         val response = try {
-            api.speech(
-                TtsRequest(
-                    model = snapshot.ttsModel,
-                    // 兼容端点的输入上限差别很大，先截一刀，宁可少读也别整个 400
-                    input = plain.take(MAX_TTS_CHARS),
-                    voice = snapshot.ttsVoice,
-                    response_format = snapshot.ttsFormat,
-                    speed = snapshot.ttsSpeed,
-                )
-            )
+            speechApi.synthesize(body)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             return@withContext SpeechResult.Failed(
-                "TTS 请求失败 @${snapshot.ttsEffectiveBaseUrl.endpointLabel()}：${e.message ?: e::class.java.simpleName}"
+                "合成请求失败 @${speech.baseUrl.endpointLabel()}：${e.message ?: e::class.java.simpleName}"
             )
         }
 
         if (!response.isSuccessful) {
-            val body = runCatching { response.errorBody()?.string() }.getOrNull()
             return@withContext SpeechResult.Failed(
-                "TTS HTTP ${response.code()} @${snapshot.ttsEffectiveBaseUrl.endpointLabel()}：${body?.take(200).orEmpty()}"
+                httpError("合成", speech.baseUrl, response.code(), response.errorBody()?.string())
             )
         }
 
-        val body = response.body() ?: return@withContext SpeechResult.Failed("TTS 返回了空响应")
-        val ext = snapshot.ttsFormat.lowercase().ifBlank { "mp3" }
-        cleanOldAudio()
-        val out = File(context.cacheDir, "tts_${System.currentTimeMillis()}.$ext")
+        val encoded = response.body()
+            ?.choices?.firstOrNull()
+            ?.message?.audio?.data.orEmpty()
+        if (encoded.isBlank()) {
+            return@withContext SpeechResult.Failed("响应里没有音频数据（模型名或音色可能不对）")
+        }
 
-        try {
-            body.byteStream().use { input ->
-                out.outputStream().use { output -> input.copyTo(output) }
-            }
+        val bytes = try {
+            Base64.decode(encoded, Base64.DEFAULT)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            out.delete()
-            return@withContext SpeechResult.Failed("写音频文件失败：${e.message ?: e::class.java.simpleName}")
-        } finally {
-            runCatching { body.close() }
+            return@withContext SpeechResult.Failed("音频 base64 解码失败：${e.message ?: e::class.java.simpleName}")
         }
+        if (bytes.isEmpty()) return@withContext SpeechResult.Failed("合成返回 0 字节")
 
-        if (out.length() == 0L) {
-            out.delete()
-            SpeechResult.Failed("TTS 返回 0 字节")
-        } else {
-            SpeechResult.Ok(out)
-        }
+        writeAudio(speech.ttsFormat.lowercase().ifBlank { "wav" }) { it.write(bytes) }
     }
 
     // ------------------------------------------------------------------ 内部
 
     private data class ClientKey(val baseUrl: String, val token: String)
 
-    /**
-     * ASR 和 TTS 各持一份客户端缓存。
-     *
-     * 以前只有一份 cachedApi —— 一旦两侧指向不同服务商，每次调用都会把对方的
-     * 实例顶掉、来回重建连接池。拆成两份额外还让两侧的 token 互不干扰。
-     */
-    private class ApiHolder {
-        @Volatile
-        var key: ClientKey? = null
+    @Volatile
+    private var cachedKey: ClientKey? = null
 
-        @Volatile
-        var api: SpeechApi? = null
-    }
+    @Volatile
+    private var cachedApi: MimoSpeechApi? = null
 
-    private val asrHolder = ApiHolder()
-    private val ttsHolder = ApiHolder()
-
-    /**
-     * 按 (规范化地址, token) 取客户端，变了就重建 ——
-     * 设置页改完立刻生效，不用重启 App。
-     */
-    private fun apiFor(holder: ApiHolder, rawBaseUrl: String, token: String): SpeechApi? {
-        val base = SettingsStore.normalizeSpeechBaseUrl(rawBaseUrl)
+    /** 地址或 key 一变就重建 —— 设置页改完立刻生效，不用重启 App。 */
+    private fun api(speech: MimoSpeech): MimoSpeechApi? {
+        val base = SettingsStore.normalizeSpeechBaseUrl(speech.baseUrl)
         if (base.isBlank()) return null
 
-        val key = ClientKey(base, token)
-        holder.api?.takeIf { holder.key == key }?.let { return it }
-        return synchronized(holder) {
-            holder.api?.takeIf { holder.key == key }
-                ?: build(base, token).also {
-                    holder.api = it
-                    holder.key = key
+        val key = ClientKey(base, speech.token)
+        cachedApi?.takeIf { cachedKey == key }?.let { return it }
+        return synchronized(this) {
+            cachedApi?.takeIf { cachedKey == key }
+                ?: build(base, speech.token).also {
+                    cachedApi = it
+                    cachedKey = key
                 }
         }
     }
 
-    private fun build(baseUrl: String, token: String): SpeechApi {
+    private fun build(baseUrl: String, token: String): MimoSpeechApi {
         val client = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
+            // 长音频识别和整段合成都可能慢，给足时间
             .callTimeout(180, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder().apply {
-                    if (token.isNotBlank()) addHeader("Authorization", "Bearer $token")
+                    if (token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer $token")
+                        // MiMo 的两份官方示例鉴权头不一致：curl 写的是 `api-key`，
+                        // Python(OpenAI SDK) 走 Authorization。既然都可能，就两个都带上 ——
+                        // 值相同不会冲突，也省得在真机上试错。
+                        addHeader("api-key", token)
+                    }
                 }.build()
                 chain.proceed(request)
             }
@@ -207,8 +240,30 @@ class SpeechRepository @Inject constructor(
             .client(client)
             .addConverterFactory(JSON.asConverterFactory("application/json".toMediaType()))
             .build()
-            .create(SpeechApi::class.java)
+            .create(MimoSpeechApi::class.java)
     }
+
+    /** 音频统一落盘，顺手清掉旧的缓存文件。 */
+    private fun writeAudio(ext: String, write: (OutputStream) -> Unit): SpeechResult<File> {
+        cleanOldAudio()
+        val out = File(context.cacheDir, "tts_${System.currentTimeMillis()}.$ext")
+        try {
+            out.outputStream().use { write(it) }
+        } catch (e: Exception) {
+            out.delete()
+            if (e is CancellationException) throw e
+            return SpeechResult.Failed("写音频文件失败：${e.message ?: e::class.java.simpleName}")
+        }
+        return if (out.length() == 0L) {
+            out.delete()
+            SpeechResult.Failed("合成返回 0 字节")
+        } else {
+            SpeechResult.Ok(out)
+        }
+    }
+
+    private fun httpError(what: String, baseUrl: String, code: Int, body: String?): String =
+        "$what HTTP $code @${baseUrl.endpointLabel()}：${body?.take(200).orEmpty()}"
 
     /** 旧 TTS 缓存留着只会占地方。 */
     private fun cleanOldAudio() {
@@ -220,17 +275,22 @@ class SpeechRepository @Inject constructor(
         }
     }
 
-    private fun String.toPlainBody(): RequestBody = toRequestBody(PLAIN_TEXT)
-
     /**
-     * 报错时只显示 host —— 两侧可能是不同服务商，不标出来根本不知道是哪一边挂了；
-     * 但完整 URL 又太长，塞进 toast 会看不清。
+     * 报错时只显示 host —— 完整 URL 太长，塞进 toast 会看不清。
      */
     private fun String.endpointLabel(): String =
         substringAfter("://", this).substringBefore('/').ifBlank { this }
 
+    /** 把 0.25~4.0 的语速折算成一句人话，给不认数字语速的 MiMo 用。 */
+    private fun Float.toPaceHint(): String? = when {
+        this <= 0.75f -> "语速放慢一些"
+        this < 1.0f -> "语速稍慢"
+        this >= 1.5f -> "语速明显加快"
+        this > 1.05f -> "语速稍快"
+        else -> null
+    }
+
     private companion object {
-        val PLAIN_TEXT = "text/plain".toMediaType()
         val JSON = Json { ignoreUnknownKeys = true; explicitNulls = false }
         const val MAX_TTS_CHARS = 4000
     }

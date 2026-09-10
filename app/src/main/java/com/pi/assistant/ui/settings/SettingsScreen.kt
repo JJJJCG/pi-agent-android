@@ -56,7 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pi.assistant.data.prefs.PiSettings
-import com.pi.assistant.data.prefs.SpeechPreset
+import com.pi.assistant.data.prefs.MimoSpeech
 import com.pi.assistant.data.prefs.ThemeMode
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -193,71 +193,63 @@ fun SettingsScreen(
 
             // ------------------------------------------- 语音输入与朗读
             Spacer(Modifier.height(4.dp))
-            SectionTitle("语音输入与朗读")
+            SectionTitle("语音（小米 MiMo）")
             Text(
-                "识别和朗读各是一套 OpenAI 兼容端点，可以填两家不同的服务商。" +
-                    "各家字段名差异大，所以全都能手改。",
+                "识别和朗读都走 MiMo，共用同一个 API Key —— 它俩挂在同一个 " +
+                    "chat/completions 接口上，不是 OpenAI 那套语音端点。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            // ---------------------------------------------------- 识别（ASR）
-            SubSectionTitle("识别（ASR）")
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SpeechPreset.entries.forEach { preset ->
-                    FilterChip(
-                        selected = draft.asrPreset == preset,
-                        onClick = { viewModel.applyAsrPreset(preset) },
-                        label = { Text(preset.label) },
-                    )
-                }
-            }
-
             Field(
-                value = draft.asrBaseUrl,
-                onValueChange = viewModel::updateAsrBaseUrl,
-                label = "识别端点地址",
-                placeholder = "https://api.openai.com/v1",
-                hint = "按 OpenAI 约定要带 /v1；只写域名会自动补上",
-            )
-
-            Field(
-                value = draft.asrToken,
-                onValueChange = viewModel::updateAsrToken,
-                label = "识别端点 token",
-                hint = "留空表示该端点不校验鉴权",
+                value = draft.mimoToken,
+                onValueChange = viewModel::updateMimoToken,
+                label = "MiMo API Key",
+                hint = "MiMo 控制台的 API Key，识别和朗读共用这一个",
                 visualTransformation = PasswordVisualTransformation(),
             )
 
             Field(
-                value = draft.asrModel,
-                onValueChange = viewModel::updateAsrModel,
-                label = "ASR 模型",
-                placeholder = "whisper-1 / gpt-4o-transcribe",
+                value = draft.mimoBaseUrl,
+                onValueChange = viewModel::updateMimoBaseUrl,
+                label = "接口地址",
+                placeholder = MimoSpeech.DEFAULT_BASE_URL,
+                hint = "只写域名会自动补 /v1；Token Plan 用户填订阅页给的区域地址",
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Field(
-                    value = draft.asrLanguage,
-                    onValueChange = viewModel::updateAsrLanguage,
-                    label = "识别语言",
-                    placeholder = "zh",
-                    modifier = Modifier.weight(1f),
+            // ------------------------------------------------------- 识别
+            SubSectionTitle("识别")
+
+            Field(
+                value = draft.asrModel,
+                onValueChange = viewModel::updateAsrModel,
+                label = "识别模型",
+                placeholder = SettingsDraft.DEFAULT_ASR_MODEL,
+            )
+
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "语种",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Field(
-                    value = draft.asrPrompt,
-                    onValueChange = viewModel::updateAsrPrompt,
-                    label = "识别提示词",
-                    placeholder = "可选",
-                    modifier = Modifier.weight(1f),
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsDraft.ASR_LANGUAGES.forEach { lang ->
+                        FilterChip(
+                            selected = draft.asrLanguage == lang,
+                            onClick = { viewModel.updateAsrLanguage(lang) },
+                            label = { Text(lang) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "明确语种比自动检测更准；方言（粤语、四川话等）模型自己会处理。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text(
-                "提示词里塞几个专有名词，能明显提升识别率。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
 
             OutlinedButton(
                 onClick = viewModel::testTranscribe,
@@ -268,94 +260,50 @@ fun SettingsScreen(
                 Text(if (draft.testingAsr) "  录音识别中…" else "  试识别（录一句实测）")
             }
 
-            if (!draft.asrConfigured) {
-                Text(
-                    "地址和模型都填上才能试识别。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            // ---------------------------------------------------- 朗读（TTS）
-            SubSectionTitle("朗读（TTS）")
-
-            SwitchRow(
-                label = "与识别使用同一服务商",
-                hint = "关掉就能给朗读单独填另一家端点",
-                checked = draft.ttsShareAsr,
-                onToggle = { viewModel.toggleTtsShareAsr() },
-            )
-
-            if (draft.ttsShareAsr) {
-                Text(
-                    text = if (draft.asrBaseUrl.isBlank()) {
-                        "朗读会跟着识别走，但识别的地址还没填。"
-                    } else {
-                        "朗读将走 ${draft.asrBaseUrl}，token 也共用。"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SpeechPreset.entries.forEach { preset ->
-                        FilterChip(
-                            selected = draft.ttsPreset == preset,
-                            onClick = { viewModel.applyTtsPreset(preset) },
-                            label = { Text(preset.label) },
-                        )
-                    }
-                }
-
-                Field(
-                    value = draft.ttsBaseUrl,
-                    onValueChange = viewModel::updateTtsBaseUrl,
-                    label = "朗读端点地址",
-                    placeholder = "https://api.openai.com/v1",
-                    hint = "和识别填不一样就是两家服务商",
-                )
-
-                Field(
-                    value = draft.ttsToken,
-                    onValueChange = viewModel::updateTtsToken,
-                    label = "朗读端点 token",
-                    hint = "留空表示该端点不校验鉴权",
-                    visualTransformation = PasswordVisualTransformation(),
-                )
-            }
+            // ------------------------------------------------------- 朗读
+            SubSectionTitle("朗读")
 
             Field(
                 value = draft.ttsModel,
                 onValueChange = viewModel::updateTtsModel,
-                label = "TTS 模型",
-                placeholder = "tts-1 / gpt-4o-mini-tts / kokoro",
+                label = "合成模型",
+                placeholder = SettingsDraft.DEFAULT_TTS_MODEL,
+            )
+
+            Field(
+                value = draft.ttsVoice,
+                onValueChange = viewModel::updateTtsVoice,
+                label = "音色",
+                placeholder = "mimo_default",
+                hint = "mimo_default、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean",
+            )
+
+            Field(
+                value = draft.ttsStylePrompt,
+                onValueChange = viewModel::updateTtsStylePrompt,
+                label = "风格指令（可选）",
+                placeholder = "温柔、稍慢的语调",
+                hint = "MiMo 把要读的文本放在 assistant 消息里，这句作为 user 指令控制语气和情绪",
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Field(
-                    value = draft.ttsVoice,
-                    onValueChange = viewModel::updateTtsVoice,
-                    label = "音色",
-                    placeholder = "alloy",
-                    modifier = Modifier.weight(1f),
-                )
                 Field(
                     value = draft.ttsSpeed,
                     onValueChange = viewModel::updateTtsSpeed,
                     label = "语速",
                     placeholder = "1.0",
                     keyboardType = KeyboardType.Decimal,
+                    hint = "MiMo 没有数字语速参数，会折算成一句指令",
+                    modifier = Modifier.weight(1f),
+                )
+                Field(
+                    value = draft.ttsFormat,
+                    onValueChange = viewModel::updateTtsFormat,
+                    label = "音频格式",
+                    placeholder = "wav",
                     modifier = Modifier.weight(1f),
                 )
             }
-
-            Field(
-                value = draft.ttsFormat,
-                onValueChange = viewModel::updateTtsFormat,
-                label = "音频格式",
-                placeholder = "mp3",
-                hint = "要和端点实际返回的格式一致，否则播放器解不出来",
-            )
 
             OutlinedButton(
                 onClick = viewModel::testSpeak,
@@ -373,9 +321,9 @@ fun SettingsScreen(
                 onToggle = { viewModel.toggleAutoSpeak() },
             )
 
-            if (draft.autoSpeak && !draft.ttsConfigured) {
+            if (!draft.asrConfigured || !draft.ttsConfigured) {
                 NoticeCard(
-                    text = "自动朗读还不会生效：朗读端点的地址或模型没填全。",
+                    text = "语音还不能用：把上面的 MiMo API Key 填上再保存。",
                     isError = true,
                 )
             }

@@ -14,9 +14,9 @@ import com.pi.assistant.audio.KwsEngine
 import com.pi.assistant.audio.TtsPlayer
 import com.pi.assistant.audio.VadRecorder
 import com.pi.assistant.data.local.MessageDao
+import com.pi.assistant.data.prefs.MimoSpeech
 import com.pi.assistant.data.prefs.PiSettings
 import com.pi.assistant.data.prefs.SettingsStore
-import com.pi.assistant.data.prefs.SpeechPreset
 import com.pi.assistant.data.prefs.ThemeMode
 import com.pi.assistant.data.pi.PiRepository
 import com.pi.assistant.data.pi.ProbeResult
@@ -60,22 +60,16 @@ data class SettingsDraft(
     val token: String = "",
     val timeoutSec: String = PiSettings.DEFAULT_TIMEOUT_SEC.toString(),
 
-    // 语音端点：识别（ASR）与朗读（TTS）各自独立，可以填两家不同的服务商
-    val asrPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val asrBaseUrl: String = PiSettings.DEFAULT_SPEECH_BASE_URL,
-    val asrToken: String = "",
+    // 语音：识别和朗读都用小米 MiMo，共用一份地址和 key
+    val mimoBaseUrl: String = MimoSpeech.DEFAULT_BASE_URL,
+    val mimoToken: String = "",
     val asrModel: String = DEFAULT_ASR_MODEL,
-    val asrLanguage: String = "zh",
-    val asrPrompt: String = "",
-
-    val ttsShareAsr: Boolean = true,
-    val ttsPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val ttsBaseUrl: String = "",
-    val ttsToken: String = "",
+    val asrLanguage: String = "auto",
     val ttsModel: String = DEFAULT_TTS_MODEL,
-    val ttsVoice: String = "alloy",
+    val ttsVoice: String = "mimo_default",
+    val ttsStylePrompt: String = "",
     val ttsSpeed: String = "1.0",
-    val ttsFormat: String = "mp3",
+    val ttsFormat: String = "wav",
     val autoSpeak: Boolean = false,
 
     // VAD
@@ -100,16 +94,20 @@ data class SettingsDraft(
     val testingSpeech: Boolean = false,
     val testingAsr: Boolean = false,
 ) {
-    val asrConfigured: Boolean get() = asrBaseUrl.isNotBlank() && asrModel.isNotBlank()
+    /** 地址和 key 都齐了才发得出去请求；模型名空着服务端也不认。 */
+    private val speechReady: Boolean
+        get() = mimoBaseUrl.isNotBlank() && mimoToken.isNotBlank()
 
-    /** 朗读实际会打到的地址 —— 开了共用就是识别那套。 */
-    val ttsEffectiveBaseUrl: String get() = if (ttsShareAsr) asrBaseUrl else ttsBaseUrl
+    val asrConfigured: Boolean get() = speechReady && asrModel.isNotBlank()
 
-    val ttsConfigured: Boolean get() = ttsEffectiveBaseUrl.isNotBlank() && ttsModel.isNotBlank()
+    val ttsConfigured: Boolean get() = speechReady && ttsModel.isNotBlank()
 
     companion object {
-        const val DEFAULT_ASR_MODEL = "gpt-4o-transcribe"
-        const val DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+        const val DEFAULT_ASR_MODEL = "mimo-v2.5-asr"
+        const val DEFAULT_TTS_MODEL = "mimo-v2.5-tts"
+
+        /** MiMo 支持的三档语种。明确语种能提升识别效果，所以给成可点的选项。 */
+        val ASR_LANGUAGES = listOf("auto", "zh", "en")
     }
 }
 
@@ -175,19 +173,18 @@ class SettingsViewModel @Inject constructor(
     fun updateTimeout(value: String) = mutate { it.copy(timeoutSec = value.digits(4)) }
     fun toggleTokenVisible() = mutate { it.copy(tokenVisible = !it.tokenVisible) }
 
-    // ---- 识别（ASR）侧
-    fun updateAsrBaseUrl(value: String) = mutate { it.copy(asrBaseUrl = value) }
-    fun updateAsrToken(value: String) = mutate { it.copy(asrToken = value) }
+    // ---- 语音：识别和朗读共用一份地址与 key
+    fun updateMimoBaseUrl(value: String) = mutate { it.copy(mimoBaseUrl = value) }
+    fun updateMimoToken(value: String) = mutate { it.copy(mimoToken = value) }
+
+    // ---- 识别
     fun updateAsrModel(value: String) = mutate { it.copy(asrModel = value) }
     fun updateAsrLanguage(value: String) = mutate { it.copy(asrLanguage = value) }
-    fun updateAsrPrompt(value: String) = mutate { it.copy(asrPrompt = value) }
 
-    // ---- 朗读（TTS）侧
-    fun toggleTtsShareAsr() = mutate { it.copy(ttsShareAsr = !it.ttsShareAsr) }
-    fun updateTtsBaseUrl(value: String) = mutate { it.copy(ttsBaseUrl = value) }
-    fun updateTtsToken(value: String) = mutate { it.copy(ttsToken = value) }
+    // ---- 朗读
     fun updateTtsModel(value: String) = mutate { it.copy(ttsModel = value) }
     fun updateTtsVoice(value: String) = mutate { it.copy(ttsVoice = value) }
+    fun updateTtsStylePrompt(value: String) = mutate { it.copy(ttsStylePrompt = value) }
     fun updateTtsFormat(value: String) = mutate { it.copy(ttsFormat = value) }
     fun updateTtsSpeed(value: String) = mutate { it.copy(ttsSpeed = value) }
     fun toggleAutoSpeak() = mutate { it.copy(autoSpeak = !it.autoSpeak) }
@@ -203,27 +200,6 @@ class SettingsViewModel @Inject constructor(
     fun toggleWakeWifi() = mutate { it.copy(wakeOnlyWifi = !it.wakeOnlyWifi) }
     fun updateWakeStart(value: String) = mutate { it.copy(wakeStartHour = value) }
     fun updateWakeEnd(value: String) = mutate { it.copy(wakeEndHour = value) }
-
-    /**
-     * 预设只负责把「它管的那一侧」填好，另一侧原样不动 —— 两侧可以是不同服务商，
-     * 一个预设同时覆盖两边只会把用户手动配好的另一半冲掉。
-     */
-    fun applyAsrPreset(preset: SpeechPreset) = mutate { draft ->
-        draft.copy(
-            asrPreset = preset,
-            asrBaseUrl = preset.baseUrl ?: draft.asrBaseUrl,
-            asrModel = preset.asrModel ?: draft.asrModel,
-        )
-    }
-
-    fun applyTtsPreset(preset: SpeechPreset) = mutate { draft ->
-        draft.copy(
-            ttsPreset = preset,
-            ttsBaseUrl = preset.baseUrl ?: draft.ttsBaseUrl,
-            ttsModel = preset.ttsModel ?: draft.ttsModel,
-            ttsVoice = preset.ttsVoice ?: draft.ttsVoice,
-        )
-    }
 
     // -------------------------------------------------------------- 动作
 
@@ -249,23 +225,19 @@ class SettingsViewModel @Inject constructor(
                     ?: PiSettings.DEFAULT_TIMEOUT_SEC,
                 themeMode = settings.current.themeMode,
 
-                asrPreset = draft.asrPreset,
-                // 地址的规范化交给 SettingsStore.save() 统一做，这里不重复一遍
-                asrBaseUrl = draft.asrBaseUrl,
-                asrToken = draft.asrToken.trim(),
-                asrModel = draft.asrModel.trim(),
-                asrLanguage = draft.asrLanguage.trim(),
-                asrPrompt = draft.asrPrompt.trim(),
-
-                ttsShareAsr = draft.ttsShareAsr,
-                ttsPreset = draft.ttsPreset,
-                ttsBaseUrl = draft.ttsBaseUrl,
-                ttsToken = draft.ttsToken.trim(),
-                ttsModel = draft.ttsModel.trim(),
-                ttsVoice = draft.ttsVoice.trim(),
-                ttsSpeed = draft.ttsSpeed.toFloatOrNull()?.coerceIn(0.25f, 4.0f) ?: 1.0f,
-                ttsFormat = draft.ttsFormat.trim().ifBlank { "mp3" },
-                autoSpeak = draft.autoSpeak,
+                speech = MimoSpeech(
+                    // 地址的规范化交给 SettingsStore.save() 统一做，这里不重复
+                    baseUrl = draft.mimoBaseUrl,
+                    token = draft.mimoToken.trim(),
+                    asrModel = draft.asrModel.trim().ifBlank { SettingsDraft.DEFAULT_ASR_MODEL },
+                    asrLanguage = draft.asrLanguage.trim().ifBlank { "auto" },
+                    ttsModel = draft.ttsModel.trim().ifBlank { SettingsDraft.DEFAULT_TTS_MODEL },
+                    ttsVoice = draft.ttsVoice.trim(),
+                    ttsStylePrompt = draft.ttsStylePrompt.trim(),
+                    ttsSpeed = draft.ttsSpeed.toFloatOrNull()?.coerceIn(0.25f, 4.0f) ?: 1.0f,
+                    ttsFormat = draft.ttsFormat.trim().ifBlank { "wav" },
+                    autoSpeak = draft.autoSpeak,
+                ),
 
                 vadThreshold = draft.vadThreshold.toFloatOrNull()?.coerceIn(0.05f, 0.95f) ?: 0.5f,
                 vadMinSilenceMs = draft.vadMinSilenceMs.toIntOrNull()?.coerceIn(200, 3000) ?: 600,
@@ -290,8 +262,8 @@ class SettingsViewModel @Inject constructor(
         )
         if (showToast) {
             val saved = settings.current
-            _toast.value = if (saved.autoSpeak && !saved.ttsConfigured) {
-                "已保存，但朗读端点还没配好，自动朗读不会生效"
+            _toast.value = if (saved.speech.autoSpeak && !saved.speech.ttsConfigured) {
+                "已保存，但语音还没配好（缺 API Key），自动朗读不会生效"
             } else {
                 "已保存"
             }
@@ -344,10 +316,10 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * 录一句真话打给 ASR。
+     * 录一句真话打给识别接口。
      *
-     * 两侧拆成不同服务商之后，「试听」只能验朗读那一半，识别侧就没有验证手段了 ——
-     * 对着一个新填的 whisper 端点，能不能出字、出的是不是中文，只能真录一句才知道。
+     * 「试听」只能验合成那一半，识别侧没有验证手段 —— 对着一套刚填好的 key，
+     * 能不能出字、语种给对没有，只能真录一句才知道。
      */
     fun testTranscribe() {
         vadRecorder.unavailableReason()?.let {
@@ -452,21 +424,16 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     baseUrl = baseUrl,
     token = token,
     timeoutSec = timeoutSec.toString(),
-    asrPreset = asrPreset,
-    asrBaseUrl = asrBaseUrl,
-    asrToken = asrToken,
-    asrModel = asrModel,
-    asrLanguage = asrLanguage,
-    asrPrompt = asrPrompt,
-    ttsShareAsr = ttsShareAsr,
-    ttsPreset = ttsPreset,
-    ttsBaseUrl = ttsBaseUrl,
-    ttsToken = ttsToken,
-    ttsModel = ttsModel,
-    ttsVoice = ttsVoice,
-    ttsSpeed = ttsSpeed.toString(),
-    ttsFormat = ttsFormat,
-    autoSpeak = autoSpeak,
+    mimoBaseUrl = speech.baseUrl,
+    mimoToken = speech.token,
+    asrModel = speech.asrModel,
+    asrLanguage = speech.asrLanguage,
+    ttsModel = speech.ttsModel,
+    ttsVoice = speech.ttsVoice,
+    ttsStylePrompt = speech.ttsStylePrompt,
+    ttsSpeed = speech.ttsSpeed.toString(),
+    ttsFormat = speech.ttsFormat,
+    autoSpeak = speech.autoSpeak,
     vadThreshold = vadThreshold.toString(),
     vadMinSilenceMs = vadMinSilenceMs.toString(),
     maxRecordSeconds = maxRecordSeconds.toString(),
