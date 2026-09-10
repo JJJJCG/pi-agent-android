@@ -2,11 +2,13 @@ name: Android CI
 
 # 什么时候跑：
 #   · push 到主分支
+#   · 打 v 开头的标签（会发正式 Release，而不是 nightly）
 #   · 提 PR
 #   · 手动点一下就跑（Actions 页面上的 Run workflow）
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
@@ -15,7 +17,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# 只读就够了 —— 这个工作流不写回仓库
+# 构建本身只读；发 Release 那一步单独要写权限
 permissions:
   contents: read
 
@@ -85,3 +87,78 @@ jobs:
           # 没产物就直接失败，别给一个空的 artifact
           if-no-files-found: error
           retention-days: 30
+
+  # ------------------------------------------------------------------ 发版
+  publish-release:
+    name: 发布到 GitHub Release
+    needs: build-debug
+    runs-on: ubuntu-latest
+    # PR 不发版 —— 否则每个 PR 都往 Releases 里塞一个包
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 取回 APK
+        uses: actions/download-artifact@v4
+        with:
+          name: PiAgent-debug
+          path: apk
+
+      - name: 定版本号与标签
+        id: meta
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "title=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            # 主分支的每次推送都覆盖同一个 nightly：Releases 页面始终只有一条，
+            # 而且下载链接固定，不用每次翻构建记录找包。
+            echo "tag=nightly" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "title=Nightly ${version} (#${GITHUB_RUN_NUMBER})" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=PiAgent-${version}-debug.apk" >> "$GITHUB_OUTPUT"
+
+      - name: 发 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          APK_NAME: ${{ steps.meta.outputs.apk_name }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          mv apk/*.apk "apk/${APK_NAME}"
+
+          cat > notes.md <<EOF
+          自动构建的 debug 包，未签名（可装，但只能靠 USB 调试安装）。
+
+          - 版本：${VERSION}
+          - 构建号：#${GITHUB_RUN_NUMBER}
+          - 提交：${GITHUB_SHA}
+          - 工作流：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          # 去掉行首缩进（heredoc 保留了缩进）
+          sed -i 's/^[[:space:]]*//' notes.md
+
+          if [ "${PRERELEASE}" = "true" ]; then
+            # 滚动更新：先删旧的再建，保证同一个 tag 下只有一份产物。
+            # 只在这条分支做，正式标签绝不删 —— 标签是历史，删了就找不回来。
+            gh release delete "${TAG}" --yes 2>/dev/null || true
+            gh release create "${TAG}" "apk/${APK_NAME}" \
+              --title "${TITLE}" --prerelease --target "${GITHUB_SHA}" --notes-file notes.md
+          else
+            gh release create "${TAG}" "apk/${APK_NAME}" \
+              --title "${TITLE}" --notes-file notes.md
+          fi
+
+          echo "::notice::已发布 ${TAG} → $(gh release view "${TAG}" --json url -q .url)"

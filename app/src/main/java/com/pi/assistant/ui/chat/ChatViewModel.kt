@@ -174,7 +174,7 @@ class ChatViewModel @Inject constructor(
                 )
                 _phase.value = SendPhase.Idle
                 refreshStatus()
-                if (settings.current.autoSpeak) {
+                if (settings.current.speech.autoSpeak) {
                     viewModelScope.launch { voiceSession.speak(result.reply) }
                 }
             }
