@@ -39,7 +39,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import javax.inject.Inject
-
+import kotlin.coroutines.coroutineContext
 /**
  * 后台常驻的唤醒服务。
  *
@@ -148,8 +148,11 @@ class WakeWordService : Service() {
      */
     private suspend fun listenUntilHit(): String? {
         var hit: String? = null
+        // 显式取协程的 isActive：在 lambda 里直接写 isActive 会解析到 CoroutineScope.isActive，
+        // 而 lambda 的接收者不是 CoroutineScope，导致歧义。
+        val alive = coroutineContext.isActive
         kwsEngine.listen(
-            shouldContinue = { isActive && hit == null && conditionsSatisfied() },
+            shouldContinue = { alive && hit == null && conditionsSatisfied() },
             onKeyword = { keyword ->
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastWakeAt >= WAKE_LOCKOUT_MS) {

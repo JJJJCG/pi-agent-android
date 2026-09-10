@@ -285,7 +285,7 @@ fun SettingsScreen(
                 label = "pi 的回复自动朗读",
                 hint = "关掉的话，可以逐条点气泡右下角的小喇叭",
                 checked = draft.autoSpeak,
-                onToggle = viewModel::toggleAutoSpeak,
+                onToggle = { viewModel.toggleAutoSpeak() },
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {

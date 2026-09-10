@@ -161,7 +161,7 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private fun apply(result: PiResult, userId: Long) {
+    private suspend fun apply(result: PiResult, userId: Long) {
         when (result) {
             is PiResult.Ok -> {
                 dao.insert(

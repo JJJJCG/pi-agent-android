@@ -121,7 +121,7 @@ class SettingsStore @Inject constructor(
 
     fun save(settings: PiSettings) {
         val normalized = settings.copy(baseUrl = normalizeBaseUrl(settings.baseUrl))
-        prefs.edit().putString(KEY, json.encodeToString(normalized)).apply()
+        prefs.edit().putString(KEY, json.encodeToString(PiSettings.serializer(), normalized)).apply()
         _state.value = normalized
     }
 

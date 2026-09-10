@@ -64,6 +64,11 @@ jobs:
       - name: 设置 Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # 本地没 SDK，编不了；先把最容易犯的「漏 import 扩展函数」这类错筛一遍，
+      # 免得编译到一半才报一堆 Unresolved reference。
+      - name: 静态体检（漏 import / 资源清单）
+        run: python3 tools/lint_imports.py
+
       - name: 编译
         run: ./gradlew assembleDebug --stacktrace
 
