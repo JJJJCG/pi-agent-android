@@ -1,0 +1,82 @@
+name: Android CI
+
+# 什么时候跑：
+#   · push 到主分支
+#   · 提 PR
+#   · 手动点一下就跑（Actions 页面上的 Run workflow）
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+# 同一条分支上的旧任务自动取消，别浪费额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 只读就够了 —— 这个工作流不写回仓库
+permissions:
+  contents: read
+
+jobs:
+  build-debug:
+    name: 构建 debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 端侧资源（so + onnx 模型）已经入库；万一被清掉了或换成别处拉，
+      # 这一步会在缺失时自动补上，不会静默编出一个没有语音能力的 APK。
+      - name: 确认端侧语音资源就位
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          check() { [ -e "$1" ] || { echo "缺少：$1"; missing=1; }; }
+          check app/src/main/assets/silero_vad.onnx
+          check app/src/main/jniLibs/arm64-v8a/libsherpa-onnx-jni.so
+          check app/src/main/assets/kws/tokens.txt
+          ls app/src/main/assets/kws/encoder*.onnx >/dev/null 2>&1 || { echo "缺少：encoder*.onnx"; missing=1; }
+
+          if [ "$missing" -eq 1 ]; then
+            echo "::group::联网拉取端侧资源"
+            python3 tools/fetch_assets.py --abis arm64-v8a
+            echo "::endgroup::"
+          else
+            echo "资源齐备，跳过下载。"
+          fi
+
+      # 只借它做依赖缓存与构建扫描上报；Gradle 版本以仓库里的 wrapper 为准
+      # （不设 gradle-version，否则会多下一份同版本的发行包，纯属浪费）
+      - name: 设置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 编译
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: 报告产物大小
+        run: |
+          set -euo pipefail
+          ls -lh app/build/outputs/apk/debug/*.apk
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PiAgent-debug
+          path: app/build/outputs/apk/debug/*.apk
+          # 没产物就直接失败，别给一个空的 artifact
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,25 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/app/build
+
+# Kotlin 2.0 的会话目录
+.kotlin/
+
+# 构建产物
+*.apk
+*.aab
+*.ap_
+*.hprof
+
+# 发布签名 —— 千万别进仓库
+*.jks
+*.keystore
+keystore.properties

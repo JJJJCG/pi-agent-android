@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  pi bridge 是局域网明文 HTTP。Android 9(API 28) 起默认禁止明文流量，
+  不放行的话请求会直接抛 CleartextNotPermitted。
+
+  这里用 base-config 全局放行明文：本 App 只在内网自用，不发布应用商店。
+  如果以后要更收敛，可以改成只放行具体网段：
+      <domain-config cleartextTrafficPermitted="true">
+          <domain includeSubdomains="true">192.168.31.145</domain>
+      </domain-config>
+  但 IP 会变，写死反而要改包重装，所以这里选择全局放行。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
