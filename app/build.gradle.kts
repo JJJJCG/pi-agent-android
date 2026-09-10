@@ -70,6 +70,8 @@ android {
 
     buildFeatures {
         compose = true
+        // AGP 8 起默认不生成 BuildConfig；调试页门控（BuildConfig.DEBUG）依赖它。
+        buildConfig = true
     }
 
     // onnx 模型文件保持不压缩：读得快点，也避免个别 ROM 上解压路径出岔子。
