@@ -19,7 +19,8 @@ local.properties
 *.ap_
 *.hprof
 
-# 发布签名 —— 千万别进仓库
+# 正式签名密钥（走 secrets 注入）别进仓库；keystore/nightly.p12 是有意
+# 入库的固定侧载密钥（保证 nightly 可覆盖升级），见 app/build.gradle.kts。
 *.jks
 *.keystore
 keystore.properties

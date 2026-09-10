@@ -28,6 +28,7 @@ android {
     // 签名：仅当 CI 注入了密钥环境变量时才启用。
     // 本地没配也能编出 release（只是未签名，需用 adb 装），不会卡住日常构建。
     signingConfigs {
+        // CI 注入正式密钥时使用（secrets：SIGNING_KEYSTORE_BASE64 等）。
         if (System.getenv("SIGNING_KEYSTORE") != null) {
             create("release") {
                 storeFile = file(System.getenv("SIGNING_KEYSTORE")!!)
@@ -35,6 +36,15 @@ android {
                 keyAlias = System.getenv("SIGNING_KEY_ALIAS")
                 keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
             }
+        }
+        // 仓库内固定密钥：nightly 侧载包专用。密钥不变，APK 才能覆盖升级
+        // ——CI runner 上 AGP 现生成的 debug 密钥每次构建都不同，没法用。
+        create("nightly") {
+            storeFile = rootProject.file("keystore/nightly.p12")
+            storeType = "PKCS12"
+            storePassword = "piagent-nightly"
+            keyAlias = "piagent"
+            keyPassword = "piagent-nightly"
         }
     }
 
@@ -53,9 +63,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            if (System.getenv("SIGNING_KEYSTORE") != null) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            // 签名优先级：CI 正式密钥 > 仓库内 nightly 固定密钥。
+            // 未签名 APK 在设备上装不上（报「软件包似乎无效」），必须兜底。
+            signingConfig = if (System.getenv("SIGNING_KEYSTORE") != null)
+                signingConfigs.getByName("release")
+            else
+                signingConfigs.getByName("nightly")
         }
     }
 

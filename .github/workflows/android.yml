@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$B64" ]; then
-            echo "未配置签名密钥，出未签名 release。"
+            echo "未配置正式签名密钥，使用仓库内 nightly 固定密钥签名。"
             exit 0
           fi
           echo "$B64" | base64 -d > "$RUNNER_TEMP/keystore.jks"
@@ -163,9 +163,9 @@ jobs:
             echo "- 提交：${GITHUB_SHA}"
             echo "- 工作流：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo ""
-            echo "说明：若仓库未配置签名密钥（SIGNING_KEYSTORE_BASE64 等 secret），"
-            echo "本包为「未签名 Release」，部分设备需通过 adb install 安装；"
-            echo "配置签名密钥后即变为可直接安装的已签名包。"
+            echo "签名说明：本包使用仓库内置的 nightly 固定密钥签名，可直接安装，"
+            echo "且后续版本可覆盖升级；配置 SIGNING_KEYSTORE_BASE64 等 secret 后，"
+            echo "构建会自动改用正式密钥签名（届时需卸载重装一次）。"
           } > notes.md
 
           if [ "${PRERELEASE}" = "true" ]; then
