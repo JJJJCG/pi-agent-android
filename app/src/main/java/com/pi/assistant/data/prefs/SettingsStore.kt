@@ -9,6 +9,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -30,6 +31,44 @@ enum class SpeechPreset {
             SELF_HOSTED -> "自建兼容端点"
             CUSTOM -> "自定义"
         }
+
+    /**
+     * 预设只负责把「它管的那一侧」的地址和模型填好，另一侧不动 ——
+     * ASR 和 TTS 可以用两家不同的服务商，一个预设不该同时覆盖两边。
+     * CUSTOM 一律返回 null，表示「不预设，保留用户已经填的」。
+     */
+    val baseUrl: String?
+        get() = when (this) {
+            OPENAI -> "https://api.openai.com/v1"
+            SELF_HOSTED -> DEFAULT_SELF_HOSTED_SPEECH_URL
+            CUSTOM -> null
+        }
+
+    val asrModel: String?
+        get() = when (this) {
+            OPENAI -> "gpt-4o-transcribe"
+            SELF_HOSTED -> "Systran/faster-whisper-large-v3"
+            CUSTOM -> null
+        }
+
+    val ttsModel: String?
+        get() = when (this) {
+            OPENAI -> "gpt-4o-mini-tts"
+            SELF_HOSTED -> "kokoro"
+            CUSTOM -> null
+        }
+
+    val ttsVoice: String?
+        get() = when (this) {
+            OPENAI -> "alloy"
+            SELF_HOSTED -> "af_heart"
+            CUSTOM -> null
+        }
+
+    companion object {
+        /** 自建端点默认指向 pi 机器上常见的本地部署地址，用户按需改。 */
+        const val DEFAULT_SELF_HOSTED_SPEECH_URL = "http://192.168.31.145:9000/v1"
+    }
 }
 
 /**
@@ -48,12 +87,26 @@ data class PiSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
 
     // ---- 语音端点（OpenAI 兼容的 ASR / TTS）
-    val speechPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val speechBaseUrl: String = DEFAULT_SPEECH_BASE_URL,
-    val speechToken: String = "",
+    //
+    // 两侧各自独立配置，可以用两家不同的服务商（例如识别走本地 whisper、
+    // 朗读走云端的 TTS）。早先这里只有一套共用的 speechPreset / speechBaseUrl /
+    // speechToken —— 用 @SerialName 把旧 key 绑到 ASR 这一侧，升级后已填的地址和
+    // token 原样还在；TTS 默认跟着 ASR 走，行为跟以前完全一致。
+    @SerialName("speechPreset")
+    val asrPreset: SpeechPreset = SpeechPreset.OPENAI,
+    @SerialName("speechBaseUrl")
+    val asrBaseUrl: String = DEFAULT_SPEECH_BASE_URL,
+    @SerialName("speechToken")
+    val asrToken: String = "",
     val asrModel: String = "gpt-4o-transcribe",
     val asrLanguage: String = "zh",
     val asrPrompt: String = "",
+
+    /** 同一家服务商是常态，默认让 TTS 复用 ASR 的地址与 token，别逼人填两遍。 */
+    val ttsShareAsr: Boolean = true,
+    val ttsPreset: SpeechPreset = SpeechPreset.OPENAI,
+    val ttsBaseUrl: String = "",
+    val ttsToken: String = "",
     val ttsModel: String = "gpt-4o-mini-tts",
     val ttsVoice: String = "alloy",
     val ttsSpeed: Float = 1.0f,
@@ -78,9 +131,24 @@ data class PiSettings(
     /** 地址填了才发得出去请求。 */
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
-    /** 语音端点是否可用（地址 + 至少一个模型名）。 */
-    val speechConfigured: Boolean
-        get() = speechBaseUrl.isNotBlank() && (asrModel.isNotBlank() || ttsModel.isNotBlank())
+    // ---- 语音端点实际生效值：TTS 开了共用就跟着 ASR 走
+
+    val ttsEffectivePreset: SpeechPreset get() = if (ttsShareAsr) asrPreset else ttsPreset
+    val ttsEffectiveBaseUrl: String get() = if (ttsShareAsr) asrBaseUrl else ttsBaseUrl
+    val ttsEffectiveToken: String get() = if (ttsShareAsr) asrToken else ttsToken
+
+    /** 识别侧可用：地址和模型名都齐了。 */
+    val asrConfigured: Boolean get() = asrBaseUrl.isNotBlank() && asrModel.isNotBlank()
+
+    /** 朗读侧可用：看的是生效后的端点（共用时就是 ASR 那套）。 */
+    val ttsConfigured: Boolean
+        get() = ttsEffectiveBaseUrl.isNotBlank() && ttsModel.isNotBlank()
+
+    /** 两侧确实指向了不同服务商 —— 设置页据此提示「正在用两家」。 */
+    val speechProvidersDiffer: Boolean
+        get() = !ttsShareAsr &&
+            ttsBaseUrl.isNotBlank() &&
+            !ttsBaseUrl.equals(asrBaseUrl, ignoreCase = true)
 
     /** 唤醒词，逗号分隔，允许配多个。 */
     val wakeKeywords: List<String>
@@ -120,7 +188,13 @@ class SettingsStore @Inject constructor(
     val current: PiSettings get() = _state.value
 
     fun save(settings: PiSettings) {
-        val normalized = settings.copy(baseUrl = normalizeBaseUrl(settings.baseUrl))
+        // 地址规范化统一收口在这里 —— 这样连只改一个开关的 updateThemeMode /
+        // updateWakeEnabled 也会顺带把三个地址修好，不会漏。
+        val normalized = settings.copy(
+            baseUrl = normalizeBaseUrl(settings.baseUrl),
+            asrBaseUrl = normalizeSpeechBaseUrl(settings.asrBaseUrl),
+            ttsBaseUrl = normalizeSpeechBaseUrl(settings.ttsBaseUrl),
+        )
         prefs.edit().putString(KEY, json.encodeToString(PiSettings.serializer(), normalized)).apply()
         _state.value = normalized
     }

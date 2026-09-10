@@ -58,9 +58,10 @@
 工作流里有几个刻意的设计：
 
 - 编译前先跑 `python3 tools/lint_imports.py`。这是给「本地没有 Android SDK、
-  编不了」这种情况准备的兜底：它专门扫 Compose 扩展函数**用了却没 import**
-  （`clickable` / `fillMaxWidth` / `collectAsState` 之类），
-  这类错在 Kotlin 里一次性会喷十条 `Unresolved reference`，在 CI 前置掉能省一轮往返。
+  编不了」这种情况准备的兜底：它专门扫 Compose 扩展函数和图标**用了却没 import**
+  （`Modifier.fillMaxWidth()`、`Icons.Filled.Mic` 之类），这类错在 Kotlin 里
+  一次性会喷十条 `Unresolved reference`，在 CI 前置掉能省一轮往返。
+  脚本是启发式的（词法扫描 + 调用形式匹配），只能减少往返，不能替代编译。
 - 会先**校验端侧资源是否齐备**（`silero_vad.onnx` / `libsherpa-onnx-jni.so` / `encoder*.onnx` …）。
   资源已入库，正常情况下直接跳过；万一缺失就自动联网补齐 ——
   避免静默编出一个「能装但没语音能力」的 APK。
@@ -126,8 +127,15 @@ jq -r .token /root/.pi/agent/http-bridge.json    # 复制这个 token
 App → 设置：
 
 - **pi 地址 / token / 超时** → 点「探活」确认，再「保存」
-- **语音端点** → 选预设（OpenAI 官方 / 自建 / 自定义）再按需改模型名，点「试听」听一句真话
+- **识别（ASR）** → 选预设（OpenAI 官方 / 自建 / 自定义）再按需改模型名，
+  点「试识别」录一句，看能不能正确出字
+- **朗读（TTS）** → 默认跟识别共用同一服务商；要换成另一家就把
+  「与识别使用同一服务商」关掉，单独填地址和 token，点「试听」听一句真话
 - **唤醒** → 先「保存」，再打开开关（首次会要录音权限）
+
+> 识别和朗读是两套独立端点，可以用不同服务商 —— 比如识别走本地的
+> faster-whisper、朗读走云端的 TTS。设置里改了地址或 token 会立刻生效，
+> 不用重启 App（两边的客户端缓存是分开的）。
 
 ---
 
@@ -226,6 +234,13 @@ JNI 是按「包名 + 类名 + 方法名」和「data class 的字段名」反�
 
 **6. 全部参数可配。** 兼容端点的模型名和字段名差异极大，预设只是快捷填充，
 填完你还能改 —— 硬编码必然返工。
+
+**6.1 ASR 与 TTS 是两套独立端点。** 两边各有自己的地址、token、预设和客户端缓存。
+`ttsShareAsr` 默认 `true`，让朗读复用识别的端点（同一家服务商是常态，不必填两遍）；
+关掉就能填第二家。预设也只填它管的那一侧，不会把另一边手动配好的覆盖掉。
+
+> 旧版本只有一套共用的 `speechBaseUrl` / `speechToken`，升级后靠 `@SerialName`
+> 把它们绑到 ASR 那一侧，已填的地址和 token 不会丢。
 
 **7. 所有 `ResponseBody.string()` 都在 `Dispatchers.IO` 里。** 它做的是网络 I/O，
 在主线程调直接 `NetworkOnMainThreadException`。

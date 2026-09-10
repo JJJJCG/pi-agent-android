@@ -60,13 +60,18 @@ data class SettingsDraft(
     val token: String = "",
     val timeoutSec: String = PiSettings.DEFAULT_TIMEOUT_SEC.toString(),
 
-    // 语音端点
-    val speechPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val speechBaseUrl: String = PiSettings.DEFAULT_SPEECH_BASE_URL,
-    val speechToken: String = "",
+    // 语音端点：识别（ASR）与朗读（TTS）各自独立，可以填两家不同的服务商
+    val asrPreset: SpeechPreset = SpeechPreset.OPENAI,
+    val asrBaseUrl: String = PiSettings.DEFAULT_SPEECH_BASE_URL,
+    val asrToken: String = "",
     val asrModel: String = DEFAULT_ASR_MODEL,
     val asrLanguage: String = "zh",
     val asrPrompt: String = "",
+
+    val ttsShareAsr: Boolean = true,
+    val ttsPreset: SpeechPreset = SpeechPreset.OPENAI,
+    val ttsBaseUrl: String = "",
+    val ttsToken: String = "",
     val ttsModel: String = DEFAULT_TTS_MODEL,
     val ttsVoice: String = "alloy",
     val ttsSpeed: String = "1.0",
@@ -93,7 +98,15 @@ data class SettingsDraft(
     val probeText: String? = null,
     val probeIsError: Boolean = false,
     val testingSpeech: Boolean = false,
+    val testingAsr: Boolean = false,
 ) {
+    val asrConfigured: Boolean get() = asrBaseUrl.isNotBlank() && asrModel.isNotBlank()
+
+    /** 朗读实际会打到的地址 —— 开了共用就是识别那套。 */
+    val ttsEffectiveBaseUrl: String get() = if (ttsShareAsr) asrBaseUrl else ttsBaseUrl
+
+    val ttsConfigured: Boolean get() = ttsEffectiveBaseUrl.isNotBlank() && ttsModel.isNotBlank()
+
     companion object {
         const val DEFAULT_ASR_MODEL = "gpt-4o-transcribe"
         const val DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
@@ -162,11 +175,17 @@ class SettingsViewModel @Inject constructor(
     fun updateTimeout(value: String) = mutate { it.copy(timeoutSec = value.digits(4)) }
     fun toggleTokenVisible() = mutate { it.copy(tokenVisible = !it.tokenVisible) }
 
-    fun updateSpeechBaseUrl(value: String) = mutate { it.copy(speechBaseUrl = value) }
-    fun updateSpeechToken(value: String) = mutate { it.copy(speechToken = value) }
+    // ---- 识别（ASR）侧
+    fun updateAsrBaseUrl(value: String) = mutate { it.copy(asrBaseUrl = value) }
+    fun updateAsrToken(value: String) = mutate { it.copy(asrToken = value) }
     fun updateAsrModel(value: String) = mutate { it.copy(asrModel = value) }
     fun updateAsrLanguage(value: String) = mutate { it.copy(asrLanguage = value) }
     fun updateAsrPrompt(value: String) = mutate { it.copy(asrPrompt = value) }
+
+    // ---- 朗读（TTS）侧
+    fun toggleTtsShareAsr() = mutate { it.copy(ttsShareAsr = !it.ttsShareAsr) }
+    fun updateTtsBaseUrl(value: String) = mutate { it.copy(ttsBaseUrl = value) }
+    fun updateTtsToken(value: String) = mutate { it.copy(ttsToken = value) }
     fun updateTtsModel(value: String) = mutate { it.copy(ttsModel = value) }
     fun updateTtsVoice(value: String) = mutate { it.copy(ttsVoice = value) }
     fun updateTtsFormat(value: String) = mutate { it.copy(ttsFormat = value) }
@@ -185,28 +204,25 @@ class SettingsViewModel @Inject constructor(
     fun updateWakeStart(value: String) = mutate { it.copy(wakeStartHour = value) }
     fun updateWakeEnd(value: String) = mutate { it.copy(wakeEndHour = value) }
 
-    /** 预设只负责把地址和模型名填好，填完你还能改 —— 兼容端点差异太大了。 */
-    fun applyPreset(preset: SpeechPreset) {
-        val patch = when (preset) {
-            SpeechPreset.OPENAI -> _draft.value.copy(
-                speechPreset = preset,
-                speechBaseUrl = "https://api.openai.com/v1",
-                asrModel = "gpt-4o-transcribe",
-                ttsModel = "gpt-4o-mini-tts",
-                ttsVoice = "alloy",
-                ttsFormat = "mp3",
-            )
-            SpeechPreset.SELF_HOSTED -> _draft.value.copy(
-                speechPreset = preset,
-                speechBaseUrl = "http://192.168.31.145:9000/v1",
-                asrModel = "Systran/faster-whisper-large-v3",
-                ttsModel = "kokoro",
-                ttsVoice = "af_heart",
-                ttsFormat = "mp3",
-            )
-            SpeechPreset.CUSTOM -> _draft.value.copy(speechPreset = preset)
-        }
-        _draft.value = patch
+    /**
+     * 预设只负责把「它管的那一侧」填好，另一侧原样不动 —— 两侧可以是不同服务商，
+     * 一个预设同时覆盖两边只会把用户手动配好的另一半冲掉。
+     */
+    fun applyAsrPreset(preset: SpeechPreset) = mutate { draft ->
+        draft.copy(
+            asrPreset = preset,
+            asrBaseUrl = preset.baseUrl ?: draft.asrBaseUrl,
+            asrModel = preset.asrModel ?: draft.asrModel,
+        )
+    }
+
+    fun applyTtsPreset(preset: SpeechPreset) = mutate { draft ->
+        draft.copy(
+            ttsPreset = preset,
+            ttsBaseUrl = preset.baseUrl ?: draft.ttsBaseUrl,
+            ttsModel = preset.ttsModel ?: draft.ttsModel,
+            ttsVoice = preset.ttsVoice ?: draft.ttsVoice,
+        )
     }
 
     // -------------------------------------------------------------- 动作
@@ -233,12 +249,18 @@ class SettingsViewModel @Inject constructor(
                     ?: PiSettings.DEFAULT_TIMEOUT_SEC,
                 themeMode = settings.current.themeMode,
 
-                speechPreset = draft.speechPreset,
-                speechBaseUrl = SettingsStore.normalizeSpeechBaseUrl(draft.speechBaseUrl),
-                speechToken = draft.speechToken.trim(),
+                asrPreset = draft.asrPreset,
+                // 地址的规范化交给 SettingsStore.save() 统一做，这里不重复一遍
+                asrBaseUrl = draft.asrBaseUrl,
+                asrToken = draft.asrToken.trim(),
                 asrModel = draft.asrModel.trim(),
                 asrLanguage = draft.asrLanguage.trim(),
                 asrPrompt = draft.asrPrompt.trim(),
+
+                ttsShareAsr = draft.ttsShareAsr,
+                ttsPreset = draft.ttsPreset,
+                ttsBaseUrl = draft.ttsBaseUrl,
+                ttsToken = draft.ttsToken.trim(),
                 ttsModel = draft.ttsModel.trim(),
                 ttsVoice = draft.ttsVoice.trim(),
                 ttsSpeed = draft.ttsSpeed.toFloatOrNull()?.coerceIn(0.25f, 4.0f) ?: 1.0f,
@@ -266,7 +288,14 @@ class SettingsViewModel @Inject constructor(
             probeText = draft.probeText,
             probeIsError = draft.probeIsError,
         )
-        if (showToast) _toast.value = "已保存"
+        if (showToast) {
+            val saved = settings.current
+            _toast.value = if (saved.autoSpeak && !saved.ttsConfigured) {
+                "已保存，但朗读端点还没配好，自动朗读不会生效"
+            } else {
+                "已保存"
+            }
+        }
     }
 
     fun updateTheme(mode: ThemeMode) = settings.updateThemeMode(mode)
@@ -311,6 +340,45 @@ class SettingsViewModel @Inject constructor(
                 is SpeechResult.Failed -> _toast.value = result.message
             }
             mutate { it.copy(testingSpeech = false) }
+        }
+    }
+
+    /**
+     * 录一句真话打给 ASR。
+     *
+     * 两侧拆成不同服务商之后，「试听」只能验朗读那一半，识别侧就没有验证手段了 ——
+     * 对着一个新填的 whisper 端点，能不能出字、出的是不是中文，只能真录一句才知道。
+     */
+    fun testTranscribe() {
+        vadRecorder.unavailableReason()?.let {
+            _toast.value = "端侧断句不可用：$it"
+            return
+        }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            _toast.value = "请先授予录音权限"
+            return
+        }
+        saveAll(showToast = false)
+        mutate { it.copy(testingAsr = true) }
+        viewModelScope.launch {
+            _toast.value = "请说一句话，说完自动停…"
+            val wav = vadRecorder.record()
+            if (wav == null) {
+                _toast.value = "没听到有效人声，再试一次"
+                mutate { it.copy(testingAsr = false) }
+                return@launch
+            }
+            try {
+                when (val result = speech.transcribe(wav)) {
+                    is SpeechResult.Ok -> _toast.value = "识别到：「${result.value}」"
+                    is SpeechResult.Failed -> _toast.value = result.message
+                }
+            } finally {
+                wav.delete()
+                mutate { it.copy(testingAsr = false) }
+            }
         }
     }
 
@@ -384,12 +452,16 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     baseUrl = baseUrl,
     token = token,
     timeoutSec = timeoutSec.toString(),
-    speechPreset = speechPreset,
-    speechBaseUrl = speechBaseUrl,
-    speechToken = speechToken,
+    asrPreset = asrPreset,
+    asrBaseUrl = asrBaseUrl,
+    asrToken = asrToken,
     asrModel = asrModel,
     asrLanguage = asrLanguage,
     asrPrompt = asrPrompt,
+    ttsShareAsr = ttsShareAsr,
+    ttsPreset = ttsPreset,
+    ttsBaseUrl = ttsBaseUrl,
+    ttsToken = ttsToken,
     ttsModel = ttsModel,
     ttsVoice = ttsVoice,
     ttsSpeed = ttsSpeed.toString(),

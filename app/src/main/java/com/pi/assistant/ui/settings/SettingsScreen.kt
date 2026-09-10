@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Visibility
@@ -190,37 +191,41 @@ fun SettingsScreen(
                 NoticeCard(text = text, isError = draft.probeIsError)
             }
 
-            // ------------------------------------------------------ 语音端点
+            // ------------------------------------------- 语音输入与朗读
             Spacer(Modifier.height(4.dp))
             SectionTitle("语音输入与朗读")
             Text(
-                "ASR / TTS 走 OpenAI 兼容端点，字段名差异大，所以全都可以手改。",
+                "识别和朗读各是一套 OpenAI 兼容端点，可以填两家不同的服务商。" +
+                    "各家字段名差异大，所以全都能手改。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
+            // ---------------------------------------------------- 识别（ASR）
+            SubSectionTitle("识别（ASR）")
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SpeechPreset.entries.forEach { preset ->
                     FilterChip(
-                        selected = draft.speechPreset == preset,
-                        onClick = { viewModel.applyPreset(preset) },
+                        selected = draft.asrPreset == preset,
+                        onClick = { viewModel.applyAsrPreset(preset) },
                         label = { Text(preset.label) },
                     )
                 }
             }
 
             Field(
-                value = draft.speechBaseUrl,
-                onValueChange = viewModel::updateSpeechBaseUrl,
-                label = "语音端点地址",
+                value = draft.asrBaseUrl,
+                onValueChange = viewModel::updateAsrBaseUrl,
+                label = "识别端点地址",
                 placeholder = "https://api.openai.com/v1",
                 hint = "按 OpenAI 约定要带 /v1；只写域名会自动补上",
             )
 
             Field(
-                value = draft.speechToken,
-                onValueChange = viewModel::updateSpeechToken,
-                label = "语音端点 token",
+                value = draft.asrToken,
+                onValueChange = viewModel::updateAsrToken,
+                label = "识别端点 token",
                 hint = "留空表示该端点不校验鉴权",
                 visualTransformation = PasswordVisualTransformation(),
             )
@@ -241,20 +246,83 @@ fun SettingsScreen(
                     modifier = Modifier.weight(1f),
                 )
                 Field(
-                    value = draft.ttsFormat,
-                    onValueChange = viewModel::updateTtsFormat,
-                    label = "音频格式",
-                    placeholder = "mp3",
+                    value = draft.asrPrompt,
+                    onValueChange = viewModel::updateAsrPrompt,
+                    label = "识别提示词",
+                    placeholder = "可选",
                     modifier = Modifier.weight(1f),
                 )
             }
-
-            Field(
-                value = draft.asrPrompt,
-                onValueChange = viewModel::updateAsrPrompt,
-                label = "识别提示词（可选）",
-                hint = "塞几个专有名词进去，能明显提升识别率",
+            Text(
+                "提示词里塞几个专有名词，能明显提升识别率。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            OutlinedButton(
+                onClick = viewModel::testTranscribe,
+                enabled = draft.asrConfigured && !draft.testingAsr && !draft.testingSpeech,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.Mic, contentDescription = null)
+                Text(if (draft.testingAsr) "  录音识别中…" else "  试识别（录一句实测）")
+            }
+
+            if (!draft.asrConfigured) {
+                Text(
+                    "地址和模型都填上才能试识别。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            // ---------------------------------------------------- 朗读（TTS）
+            SubSectionTitle("朗读（TTS）")
+
+            SwitchRow(
+                label = "与识别使用同一服务商",
+                hint = "关掉就能给朗读单独填另一家端点",
+                checked = draft.ttsShareAsr,
+                onToggle = { viewModel.toggleTtsShareAsr() },
+            )
+
+            if (draft.ttsShareAsr) {
+                Text(
+                    text = if (draft.asrBaseUrl.isBlank()) {
+                        "朗读会跟着识别走，但识别的地址还没填。"
+                    } else {
+                        "朗读将走 ${draft.asrBaseUrl}，token 也共用。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SpeechPreset.entries.forEach { preset ->
+                        FilterChip(
+                            selected = draft.ttsPreset == preset,
+                            onClick = { viewModel.applyTtsPreset(preset) },
+                            label = { Text(preset.label) },
+                        )
+                    }
+                }
+
+                Field(
+                    value = draft.ttsBaseUrl,
+                    onValueChange = viewModel::updateTtsBaseUrl,
+                    label = "朗读端点地址",
+                    placeholder = "https://api.openai.com/v1",
+                    hint = "和识别填不一样就是两家服务商",
+                )
+
+                Field(
+                    value = draft.ttsToken,
+                    onValueChange = viewModel::updateTtsToken,
+                    label = "朗读端点 token",
+                    hint = "留空表示该端点不校验鉴权",
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+            }
 
             Field(
                 value = draft.ttsModel,
@@ -281,6 +349,23 @@ fun SettingsScreen(
                 )
             }
 
+            Field(
+                value = draft.ttsFormat,
+                onValueChange = viewModel::updateTtsFormat,
+                label = "音频格式",
+                placeholder = "mp3",
+                hint = "要和端点实际返回的格式一致，否则播放器解不出来",
+            )
+
+            OutlinedButton(
+                onClick = viewModel::testSpeak,
+                enabled = draft.ttsConfigured && !draft.testingSpeech && !draft.testingAsr,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Filled.VolumeUp, contentDescription = null)
+                Text(if (draft.testingSpeech) "  合成中…" else "  试听（合成一句话）")
+            }
+
             SwitchRow(
                 label = "pi 的回复自动朗读",
                 hint = "关掉的话，可以逐条点气泡右下角的小喇叭",
@@ -288,19 +373,16 @@ fun SettingsScreen(
                 onToggle = { viewModel.toggleAutoSpeak() },
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { viewModel.saveAll() }, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Filled.Save, contentDescription = null)
-                    Text("  保存")
-                }
-                OutlinedButton(
-                    onClick = viewModel::testSpeak,
-                    enabled = !draft.testingSpeech,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Filled.VolumeUp, contentDescription = null)
-                    Text(if (draft.testingSpeech) "  合成中…" else "  试听")
-                }
+            if (draft.autoSpeak && !draft.ttsConfigured) {
+                NoticeCard(
+                    text = "自动朗读还不会生效：朗读端点的地址或模型没填全。",
+                    isError = true,
+                )
+            }
+
+            Button(onClick = { viewModel.saveAll() }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Save, contentDescription = null)
+                Text("  保存")
             }
 
             viewModel.micProblem?.let {
@@ -503,6 +585,16 @@ private fun SectionTitle(text: String) {
         text = text,
         style = MaterialTheme.typography.titleLarge,
         modifier = Modifier.padding(top = 4.dp),
+    )
+}
+
+/** 大节里的小节标题 —— 语音那块要分「识别 / 朗读」两半，用这个区分层级。 */
+@Composable
+private fun SubSectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(top = 8.dp),
     )
 }
 
