@@ -23,3 +23,7 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+
+# tools/ 下脚本的 Python 字节码缓存
+__pycache__/
+*.pyc
