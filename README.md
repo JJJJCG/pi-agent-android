@@ -21,7 +21,7 @@
 
 ```
 界面层  ──►  VoiceSession（编排）  ──►  端侧：VAD / KWS（sherpa-onnx，可选）
-                                   └─►  云端：ASR / TTS（OpenAI 兼容，可选）
+                                   └─►  云端：ASR / TTS（协议可选，可选）
                                    └─►  pi  ：PiRepository（必需）
 ```
 
@@ -127,15 +127,69 @@ jq -r .token /root/.pi/agent/http-bridge.json    # 复制这个 token
 App → 设置：
 
 - **pi 地址 / token / 超时** → 点「探活」确认，再「保存」
-- **识别（ASR）** → 选预设（OpenAI 官方 / 自建 / 自定义）再按需改模型名，
-  点「试识别」录一句，看能不能正确出字
-- **朗读（TTS）** → 默认跟识别共用同一服务商；要换成另一家就把
-  「与识别使用同一服务商」关掉，单独填地址和 token，点「试听」听一句真话
+- **识别（ASR）** → 默认是百炼 Fun-ASR。地址里的 `{WorkspaceId}` 必须换成你控制台上的
+  那个（不换发不出去，界面会红字提醒），token 填 `DASHSCOPE_API_KEY`。
+  点「试识别」录一句看能不能出字
+- **朗读（TTS）** → 默认是小米 MiMo。token 填 MiMo 控制台的 API Key，
+  音色默认 `mimo_default`（中国集群就是「冰糖」）。点「试听」听一句真话
 - **唤醒** → 先「保存」，再打开开关（首次会要录音权限）
 
-> 识别和朗读是两套独立端点，可以用不同服务商 —— 比如识别走本地的
-> faster-whisper、朗读走云端的 TTS。设置里改了地址或 token 会立刻生效，
-> 不用重启 App（两边的客户端缓存是分开的）。
+### 2.3.1 协议是怎么分的
+
+识别和朗读各自带一个**协议**选择，它和「服务商」是两件事 —— 协议决定请求长什么样：
+
+| 协议 | 请求形状 |
+|---|---|
+| OpenAI 兼容（识别） | multipart 上传音频到 `/audio/transcriptions` |
+| 百炼 DashScope（识别） | 音频以 base64 data URI 塞进 JSON，走 `multimodal-generation` |
+| OpenAI 兼容（朗读） | `POST /audio/speech`，响应体就是音频字节 |
+| MiMo 聊天补全（朗读） | 走 `chat/completions`，音频 base64 藏在响应 JSON 里 |
+
+三个容易踩的点，代码里都处理了：
+
+- **MiMo 的合成文本要放 `assistant` 消息**，放 `user` 会被当成风格指令、不出声。
+  界面上那个「风格指令」输入框才是塞进 `user` 的。
+- **MiMo 没有数字语速参数**，语速只能靠自然语言控制。所以 `ttsSpeed` 会被折算成
+  一句「语速稍快」拼进风格指令，免得这个设置项在 MiMo 下静默失效。
+- **百炼的地址不能补 `/v1`**，它的路径由接口声明去拼；误粘完整端点也会被自动剥掉。
+
+> 识别和朗读的协议、地址、token 完全独立，改了立刻生效不用重启（客户端缓存按协议
+> 分开存）。识别选百炼时「与识别使用同一服务商」开关会隐藏 —— 那套端点只做识别。
+
+### 2.3.2 这两家兼容 OpenAI 接口吗
+
+**结论：都不兼容 OpenAI 的语音接口。** 但「不像」的程度不一样，值得分清：
+
+**MiMo TTS —— 形似而神不似。** 它的 `base_url` 是 `https://api.xiaomimimo.com/v1`，
+官方示例直接用 `openai` SDK 的 `client.chat.completions.create(...)`，看着很像 OpenAI。
+但它**不是** `POST /v1/audio/speech`：
+
+| | OpenAI TTS | MiMo TTS |
+|---|---|---|
+| 端点 | `POST /v1/audio/speech` | `POST /v1/chat/completions` |
+| 待合成文本 | 请求体 `input` 字段 | **`assistant` 消息的 content** |
+| 风格/语速 | 请求体 `voice` / `speed` | `user` 消息的自然语言指令 |
+| 音频返回 | 响应体直接是音频字节 | JSON 里 `choices[0].message.audio.data`，**base64** |
+| 音色参数 | 顶层 `voice` | 嵌在 `audio: { voice }` 里 |
+
+它复用的是 OpenAI 的**聊天补全**接口形态（跟 `gpt-4o-audio-preview` 那套更接近），
+不是 TTS 接口。所以能套 OpenAI 的 SDK，但套不了任何「OpenAI 兼容 TTS」的现成客户端。
+
+**百炼 Fun-ASR-Flash —— 完全不兼容。** 从鉴权头到响应结构都是阿里云 DashScope 自有的：
+
+- 端点是 `/{WorkspaceId}.{region}.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`
+  —— 域名里带 Workspace ID，跟 `api.openai.com` 这种固定域名不是一个路数
+- 音频以 **base64 data URI** 塞进 `input.messages[].content[].input_audio.data`，
+  不是 multipart 上传
+- 响应**没有 `choices` 字段**，文字在 `output.text`
+- 有 `X-DashScope-SSE` 这类私有头，`parameters` 里是 `sample_rate` / `vocabulary_id`
+  这些 OpenAI 侧不存在的字段
+
+**所以为什么不共用一个实现。** 上一版代码里两端共用一套 OpenAI 兼容实现是建立在
+「两家都是 OpenAI 兼容端点」这个前提上的；换成 MiMo + 百炼之后这个前提不成立了，
+必须按协议分发（`AsrProtocol` / `TtsProtocol`）。原来那套 OpenAI 实现保留着，
+预设里选「OpenAI 官方 / 自建兼容端点」仍然走它 —— 想继续用 OpenAI 或本地
+faster-whisper 都不受影响。
 
 ---
 
@@ -186,7 +240,7 @@ com.pi.assistant/
     ToneCue.kt               唤醒提示音
   data/
     pi/                      pi bridge 客户端 + 错误状态机（M1 的灵魂）
-    speech/                  OpenAI 兼容 ASR / TTS
+    speech/                  三套语音协议：OpenAI 兼容 / 百炼 Fun-ASR / MiMo TTS
     prefs/SettingsStore.kt   全部配置（JSON 一条存进 Keystore 加密）
     local/                   Room 历史
   voice/
@@ -235,12 +289,16 @@ JNI 是按「包名 + 类名 + 方法名」和「data class 的字段名」反�
 **6. 全部参数可配。** 兼容端点的模型名和字段名差异极大，预设只是快捷填充，
 填完你还能改 —— 硬编码必然返工。
 
-**6.1 ASR 与 TTS 是两套独立端点。** 两边各有自己的地址、token、预设和客户端缓存。
-`ttsShareAsr` 默认 `true`，让朗读复用识别的端点（同一家服务商是常态，不必填两遍）；
-关掉就能填第二家。预设也只填它管的那一侧，不会把另一边手动配好的覆盖掉。
+**6.1 ASR 与 TTS 是两套独立端点，而且协议可以不同。** 两侧各有自己的协议、地址、
+token、预设和客户端缓存。协议单独拎出来当一等公民，是因为这几家的 HTTP 契约差得远，
+不是换个域名就能通（详见 §2.3.1）。协议解析用「可空 override + 跟随预设兜底」：
+老配置里没有协议字段，如果给它非空默认值，那些原本用 OpenAI 的配置会解析成默认协议、
+请求直接发错。
 
-> 旧版本只有一套共用的 `speechBaseUrl` / `speechToken`，升级后靠 `@SerialName`
-> 把它们绑到 ASR 那一侧，已填的地址和 token 不会丢。
+**6.2 百炼的提示词没接。** OpenAI 的 `/audio/transcriptions` 有个 `prompt` 字段可以
+塞专有名词，百炼的上下文走 `input_text`/`text` 消息对，格式对不上（而且文档要求
+user 上下文后面必须跟对应的 assistant 消息）。硬拼一个假的 assistant 回复更糟，
+所以百炼协议下这个输入框直接置灰，并在界面上说明。
 
 **7. 所有 `ResponseBody.string()` 都在 `Dispatchers.IO` 里。** 它做的是网络 I/O，
 在主线程调直接 `NetworkOnMainThreadException`。
@@ -255,6 +313,14 @@ JNI 是按「包名 + 类名 + 方法名」和「data class 的字段名」反�
 - **端侧 ASR 降级没做**：文档里提到网络挂了降级到 SenseVoice，本工程未实现。
   断网时语音识别直接报错，文本对话不受影响。
 - **长文本 TTS 未做流式分段**：目前整段合成，首字延迟偏高。文档列为二期优化。
+- **MiMo 用的是非流式**：按需求指定 `stream=false`（不传），一次拿完整 wav。
+  它虽然已支持低延迟流式（流式要 `pcm16` 再自己拼容器），但这里没用 ——
+  好处是不用做容器拼接，代价是首字延迟。
+- **MiMo 没有数字语速参数**：`ttsSpeed` 会被折算成「语速稍快」这类自然语言指令，
+  不是精确倍率。要精确控制只能自己在风格指令里写细一点。
+- **百炼的提示词不支持**（见 §6.2），热词得用控制台预编译的词汇表。
+- **百炼的语音合成没接**：识别侧选了百炼时，「与识别共用」会隐藏 ——
+  这节课只做了它的识别。要朗读请用 MiMo 或 OpenAI 协议。
 - **没有打断接口**：pi 只有一问一答，唤醒后中途改口要等它答完。
 - **厂商保活只能尽力而为**：代码侧只做到引导跳电池优化白名单，
   小米/华为/OPPO/vivo 的自启动与后台白名单仍需手动设置。

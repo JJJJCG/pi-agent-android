@@ -14,10 +14,13 @@ import com.pi.assistant.audio.KwsEngine
 import com.pi.assistant.audio.TtsPlayer
 import com.pi.assistant.audio.VadRecorder
 import com.pi.assistant.data.local.MessageDao
+import com.pi.assistant.data.prefs.AsrPreset
+import com.pi.assistant.data.prefs.AsrProtocol
 import com.pi.assistant.data.prefs.PiSettings
 import com.pi.assistant.data.prefs.SettingsStore
-import com.pi.assistant.data.prefs.SpeechPreset
 import com.pi.assistant.data.prefs.ThemeMode
+import com.pi.assistant.data.prefs.TtsPreset
+import com.pi.assistant.data.prefs.TtsProtocol
 import com.pi.assistant.data.pi.PiRepository
 import com.pi.assistant.data.pi.ProbeResult
 import com.pi.assistant.data.speech.SpeechRepository
@@ -60,22 +63,25 @@ data class SettingsDraft(
     val token: String = "",
     val timeoutSec: String = PiSettings.DEFAULT_TIMEOUT_SEC.toString(),
 
-    // 语音端点：识别（ASR）与朗读（TTS）各自独立，可以填两家不同的服务商
-    val asrPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val asrBaseUrl: String = PiSettings.DEFAULT_SPEECH_BASE_URL,
+    // 语音端点：识别与朗读各自独立，协议 + 服务商都可以不同
+    val asrPreset: AsrPreset = AsrPreset.BAILIAN_FUN_ASR,
+    val asrProtocolOverride: AsrProtocol? = null,
+    val asrBaseUrl: String = AsrPreset.DEFAULT_BAILIAN_ASR_URL,
     val asrToken: String = "",
     val asrModel: String = DEFAULT_ASR_MODEL,
     val asrLanguage: String = "zh",
     val asrPrompt: String = "",
 
-    val ttsShareAsr: Boolean = true,
-    val ttsPreset: SpeechPreset = SpeechPreset.OPENAI,
-    val ttsBaseUrl: String = "",
+    val ttsShareAsr: Boolean = false,
+    val ttsPreset: TtsPreset = TtsPreset.MIMO_V25,
+    val ttsProtocolOverride: TtsProtocol? = null,
+    val ttsBaseUrl: String = TtsPreset.DEFAULT_MIMO_BASE_URL,
     val ttsToken: String = "",
     val ttsModel: String = DEFAULT_TTS_MODEL,
-    val ttsVoice: String = "alloy",
+    val ttsVoice: String = "mimo_default",
+    val ttsStylePrompt: String = "",
     val ttsSpeed: String = "1.0",
-    val ttsFormat: String = "mp3",
+    val ttsFormat: String = "wav",
     val autoSpeak: Boolean = false,
 
     // VAD
@@ -100,16 +106,33 @@ data class SettingsDraft(
     val testingSpeech: Boolean = false,
     val testingAsr: Boolean = false,
 ) {
+    val asrProtocol: AsrProtocol get() = asrProtocolOverride ?: asrPreset.protocol ?: AsrProtocol.OPENAI
+
+    /** 识别那家能不能顺带做朗读；不能的话「共用」开关就该藏起来。 */
+    val ttsShareAvailable: Boolean get() = asrProtocol != AsrProtocol.BAILIAN_FUN_ASR
+
+    val ttsProtocol: TtsProtocol
+        get() = if (ttsShareAsr && ttsShareAvailable) {
+            TtsProtocol.OPENAI
+        } else {
+            ttsProtocolOverride ?: ttsPreset.protocol ?: TtsProtocol.OPENAI
+        }
+
     val asrConfigured: Boolean get() = asrBaseUrl.isNotBlank() && asrModel.isNotBlank()
 
     /** 朗读实际会打到的地址 —— 开了共用就是识别那套。 */
-    val ttsEffectiveBaseUrl: String get() = if (ttsShareAsr) asrBaseUrl else ttsBaseUrl
+    val ttsEffectiveBaseUrl: String
+        get() = if (ttsShareAsr && ttsShareAvailable) asrBaseUrl else ttsBaseUrl
 
     val ttsConfigured: Boolean get() = ttsEffectiveBaseUrl.isNotBlank() && ttsModel.isNotBlank()
 
+    /** 百炼的地址模板没替换过 —— 直接发出去必然连不上，提前拦一道。 */
+    val asrBaseUrlLooksUnfilled: Boolean
+        get() = asrBaseUrl.contains("{WorkspaceId}", ignoreCase = true)
+
     companion object {
-        const val DEFAULT_ASR_MODEL = "gpt-4o-transcribe"
-        const val DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+        const val DEFAULT_ASR_MODEL = "fun-asr-flash-2026-06-15"
+        const val DEFAULT_TTS_MODEL = "mimo-v2.5-tts"
     }
 }
 
@@ -176,6 +199,7 @@ class SettingsViewModel @Inject constructor(
     fun toggleTokenVisible() = mutate { it.copy(tokenVisible = !it.tokenVisible) }
 
     // ---- 识别（ASR）侧
+    fun updateAsrProtocol(protocol: AsrProtocol) = mutate { it.copy(asrProtocolOverride = protocol) }
     fun updateAsrBaseUrl(value: String) = mutate { it.copy(asrBaseUrl = value) }
     fun updateAsrToken(value: String) = mutate { it.copy(asrToken = value) }
     fun updateAsrModel(value: String) = mutate { it.copy(asrModel = value) }
@@ -184,10 +208,12 @@ class SettingsViewModel @Inject constructor(
 
     // ---- 朗读（TTS）侧
     fun toggleTtsShareAsr() = mutate { it.copy(ttsShareAsr = !it.ttsShareAsr) }
+    fun updateTtsProtocol(protocol: TtsProtocol) = mutate { it.copy(ttsProtocolOverride = protocol) }
     fun updateTtsBaseUrl(value: String) = mutate { it.copy(ttsBaseUrl = value) }
     fun updateTtsToken(value: String) = mutate { it.copy(ttsToken = value) }
     fun updateTtsModel(value: String) = mutate { it.copy(ttsModel = value) }
     fun updateTtsVoice(value: String) = mutate { it.copy(ttsVoice = value) }
+    fun updateTtsStylePrompt(value: String) = mutate { it.copy(ttsStylePrompt = value) }
     fun updateTtsFormat(value: String) = mutate { it.copy(ttsFormat = value) }
     fun updateTtsSpeed(value: String) = mutate { it.copy(ttsSpeed = value) }
     fun toggleAutoSpeak() = mutate { it.copy(autoSpeak = !it.autoSpeak) }
@@ -205,23 +231,28 @@ class SettingsViewModel @Inject constructor(
     fun updateWakeEnd(value: String) = mutate { it.copy(wakeEndHour = value) }
 
     /**
-     * 预设只负责把「它管的那一侧」填好，另一侧原样不动 —— 两侧可以是不同服务商，
-     * 一个预设同时覆盖两边只会把用户手动配好的另一半冲掉。
+     * 预设负责把「它管的那一侧」的协议、地址、模型一次填好，另一侧原样不动 ——
+     * 两侧可以是不同服务商，一个预设同时覆盖两边只会把手动配好的另一半冲掉。
+     * 填完照样能改，包括单独换协议。
      */
-    fun applyAsrPreset(preset: SpeechPreset) = mutate { draft ->
+    fun applyAsrPreset(preset: AsrPreset) = mutate { draft ->
         draft.copy(
             asrPreset = preset,
+            // CUSTOM 不带协议，那就沿用当前选着的那个
+            asrProtocolOverride = preset.protocol ?: draft.asrProtocol,
             asrBaseUrl = preset.baseUrl ?: draft.asrBaseUrl,
-            asrModel = preset.asrModel ?: draft.asrModel,
+            asrModel = preset.model ?: draft.asrModel,
         )
     }
 
-    fun applyTtsPreset(preset: SpeechPreset) = mutate { draft ->
+    fun applyTtsPreset(preset: TtsPreset) = mutate { draft ->
         draft.copy(
             ttsPreset = preset,
+            ttsProtocolOverride = preset.protocol ?: draft.ttsProtocol,
             ttsBaseUrl = preset.baseUrl ?: draft.ttsBaseUrl,
-            ttsModel = preset.ttsModel ?: draft.ttsModel,
-            ttsVoice = preset.ttsVoice ?: draft.ttsVoice,
+            ttsModel = preset.model ?: draft.ttsModel,
+            ttsVoice = preset.voice ?: draft.ttsVoice,
+            ttsFormat = preset.format ?: draft.ttsFormat,
         )
     }
 
@@ -250,7 +281,8 @@ class SettingsViewModel @Inject constructor(
                 themeMode = settings.current.themeMode,
 
                 asrPreset = draft.asrPreset,
-                // 地址的规范化交给 SettingsStore.save() 统一做，这里不重复一遍
+                asrProtocolOverride = draft.asrProtocolOverride,
+                // 地址的规范化交给 SettingsStore.save() 按协议统一做，这里不重复
                 asrBaseUrl = draft.asrBaseUrl,
                 asrToken = draft.asrToken.trim(),
                 asrModel = draft.asrModel.trim(),
@@ -259,12 +291,14 @@ class SettingsViewModel @Inject constructor(
 
                 ttsShareAsr = draft.ttsShareAsr,
                 ttsPreset = draft.ttsPreset,
+                ttsProtocolOverride = draft.ttsProtocolOverride,
                 ttsBaseUrl = draft.ttsBaseUrl,
                 ttsToken = draft.ttsToken.trim(),
                 ttsModel = draft.ttsModel.trim(),
                 ttsVoice = draft.ttsVoice.trim(),
+                ttsStylePrompt = draft.ttsStylePrompt.trim(),
                 ttsSpeed = draft.ttsSpeed.toFloatOrNull()?.coerceIn(0.25f, 4.0f) ?: 1.0f,
-                ttsFormat = draft.ttsFormat.trim().ifBlank { "mp3" },
+                ttsFormat = draft.ttsFormat.trim().ifBlank { "wav" },
                 autoSpeak = draft.autoSpeak,
 
                 vadThreshold = draft.vadThreshold.toFloatOrNull()?.coerceIn(0.05f, 0.95f) ?: 0.5f,
@@ -350,6 +384,10 @@ class SettingsViewModel @Inject constructor(
      * 对着一个新填的 whisper 端点，能不能出字、出的是不是中文，只能真录一句才知道。
      */
     fun testTranscribe() {
+        if (_draft.value.asrBaseUrlLooksUnfilled) {
+            _toast.value = "识别地址里的 {WorkspaceId} 还没换成你自己的"
+            return
+        }
         vadRecorder.unavailableReason()?.let {
             _toast.value = "端侧断句不可用：$it"
             return
@@ -453,6 +491,7 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     token = token,
     timeoutSec = timeoutSec.toString(),
     asrPreset = asrPreset,
+    asrProtocolOverride = asrProtocolOverride,
     asrBaseUrl = asrBaseUrl,
     asrToken = asrToken,
     asrModel = asrModel,
@@ -460,10 +499,12 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     asrPrompt = asrPrompt,
     ttsShareAsr = ttsShareAsr,
     ttsPreset = ttsPreset,
+    ttsProtocolOverride = ttsProtocolOverride,
     ttsBaseUrl = ttsBaseUrl,
     ttsToken = ttsToken,
     ttsModel = ttsModel,
     ttsVoice = ttsVoice,
+    ttsStylePrompt = ttsStylePrompt,
     ttsSpeed = ttsSpeed.toString(),
     ttsFormat = ttsFormat,
     autoSpeak = autoSpeak,

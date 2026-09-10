@@ -55,9 +55,12 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.pi.assistant.data.prefs.AsrPreset
+import com.pi.assistant.data.prefs.AsrProtocol
 import com.pi.assistant.data.prefs.PiSettings
-import com.pi.assistant.data.prefs.SpeechPreset
 import com.pi.assistant.data.prefs.ThemeMode
+import com.pi.assistant.data.prefs.TtsPreset
+import com.pi.assistant.data.prefs.TtsProtocol
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -195,8 +198,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(4.dp))
             SectionTitle("语音输入与朗读")
             Text(
-                "识别和朗读各是一套 OpenAI 兼容端点，可以填两家不同的服务商。" +
-                    "各家字段名差异大，所以全都能手改。",
+                "识别和朗读各自独立，协议和服务商都能不同 —— 默认识别用百炼 Fun-ASR、朗读用小米 MiMo。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -205,7 +207,7 @@ fun SettingsScreen(
             SubSectionTitle("识别（ASR）")
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SpeechPreset.entries.forEach { preset ->
+                AsrPreset.entries.forEach { preset ->
                     FilterChip(
                         selected = draft.asrPreset == preset,
                         onClick = { viewModel.applyAsrPreset(preset) },
@@ -214,19 +216,43 @@ fun SettingsScreen(
                 }
             }
 
+            ProtocolRow(
+                label = "请求协议",
+                options = AsrProtocol.entries.map { it to it.label() },
+                selected = draft.asrProtocol,
+                onSelect = viewModel::updateAsrProtocol,
+                hint = draft.asrProtocol.hint(),
+            )
+
             Field(
                 value = draft.asrBaseUrl,
                 onValueChange = viewModel::updateAsrBaseUrl,
                 label = "识别端点地址",
-                placeholder = "https://api.openai.com/v1",
-                hint = "按 OpenAI 约定要带 /v1；只写域名会自动补上",
+                placeholder = "https://xxx.cn-beijing.maas.aliyuncs.com",
+                hint = if (draft.asrProtocol == AsrProtocol.BAILIAN_FUN_ASR) {
+                    "把 {WorkspaceId} 换成控制台上的那个；只填到域名，路径由 App 补"
+                } else {
+                    "按 OpenAI 约定要带 /v1；只写域名会自动补上"
+                },
             )
+
+            if (draft.asrBaseUrlLooksUnfilled) {
+                NoticeCard(
+                    text = "地址里的 {WorkspaceId} 还是占位符，这样请求发不出去。" +
+                        "去百炼控制台复制你的 Workspace ID 换上。",
+                    isError = true,
+                )
+            }
 
             Field(
                 value = draft.asrToken,
                 onValueChange = viewModel::updateAsrToken,
                 label = "识别端点 token",
-                hint = "留空表示该端点不校验鉴权",
+                hint = if (draft.asrProtocol == AsrProtocol.BAILIAN_FUN_ASR) {
+                    "百炼这边是 DASHSCOPE_API_KEY，注意北京和新加坡的 key 不通用"
+                } else {
+                    "留空表示该端点不校验鉴权"
+                },
                 visualTransformation = PasswordVisualTransformation(),
             )
 
@@ -234,7 +260,7 @@ fun SettingsScreen(
                 value = draft.asrModel,
                 onValueChange = viewModel::updateAsrModel,
                 label = "ASR 模型",
-                placeholder = "whisper-1 / gpt-4o-transcribe",
+                placeholder = "fun-asr-flash-2026-06-15",
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -243,6 +269,11 @@ fun SettingsScreen(
                     onValueChange = viewModel::updateAsrLanguage,
                     label = "识别语言",
                     placeholder = "zh",
+                    hint = if (draft.asrProtocol == AsrProtocol.BAILIAN_FUN_ASR) {
+                        "百炼只认第一个值"
+                    } else {
+                        null
+                    },
                     modifier = Modifier.weight(1f),
                 )
                 Field(
@@ -250,11 +281,17 @@ fun SettingsScreen(
                     onValueChange = viewModel::updateAsrPrompt,
                     label = "识别提示词",
                     placeholder = "可选",
+                    enabled = draft.asrProtocol == AsrProtocol.OPENAI,
                     modifier = Modifier.weight(1f),
                 )
             }
             Text(
-                "提示词里塞几个专有名词，能明显提升识别率。",
+                text = if (draft.asrProtocol == AsrProtocol.OPENAI) {
+                    "提示词里塞几个专有名词，能明显提升识别率。"
+                } else {
+                    "提示词只在 OpenAI 协议下生效 —— 百炼的上下文走消息列表，格式对不上，" +
+                        "所以这边不发它。热词请用百炼控制台预编译的词汇表。"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -279,14 +316,16 @@ fun SettingsScreen(
             // ---------------------------------------------------- 朗读（TTS）
             SubSectionTitle("朗读（TTS）")
 
-            SwitchRow(
-                label = "与识别使用同一服务商",
-                hint = "关掉就能给朗读单独填另一家端点",
-                checked = draft.ttsShareAsr,
-                onToggle = { viewModel.toggleTtsShareAsr() },
-            )
+            if (draft.ttsShareAvailable) {
+                SwitchRow(
+                    label = "与识别使用同一服务商",
+                    hint = "关掉就能给朗读单独填另一家端点",
+                    checked = draft.ttsShareAsr,
+                    onToggle = { viewModel.toggleTtsShareAsr() },
+                )
+            }
 
-            if (draft.ttsShareAsr) {
+            if (draft.ttsShareAsr && draft.ttsShareAvailable) {
                 Text(
                     text = if (draft.asrBaseUrl.isBlank()) {
                         "朗读会跟着识别走，但识别的地址还没填。"
@@ -298,7 +337,7 @@ fun SettingsScreen(
                 )
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SpeechPreset.entries.forEach { preset ->
+                    TtsPreset.entries.forEach { preset ->
                         FilterChip(
                             selected = draft.ttsPreset == preset,
                             onClick = { viewModel.applyTtsPreset(preset) },
@@ -307,19 +346,35 @@ fun SettingsScreen(
                     }
                 }
 
+                ProtocolRow(
+                    label = "请求协议",
+                    options = TtsProtocol.entries.map { it to it.label() },
+                    selected = draft.ttsProtocol,
+                    onSelect = viewModel::updateTtsProtocol,
+                    hint = draft.ttsProtocol.hint(),
+                )
+
                 Field(
                     value = draft.ttsBaseUrl,
                     onValueChange = viewModel::updateTtsBaseUrl,
                     label = "朗读端点地址",
-                    placeholder = "https://api.openai.com/v1",
-                    hint = "和识别填不一样就是两家服务商",
+                    placeholder = "https://api.xiaomimimo.com/v1",
+                    hint = if (draft.ttsProtocol == TtsProtocol.MIMO_CHAT) {
+                        "MiMo 的地址得带 /v1，只写域名会自动补上"
+                    } else {
+                        "和识别填不一样就是两家服务商"
+                    },
                 )
 
                 Field(
                     value = draft.ttsToken,
                     onValueChange = viewModel::updateTtsToken,
                     label = "朗读端点 token",
-                    hint = "留空表示该端点不校验鉴权",
+                    hint = if (draft.ttsProtocol == TtsProtocol.MIMO_CHAT) {
+                        "MiMo 控制台的 API Key"
+                    } else {
+                        "留空表示该端点不校验鉴权"
+                    },
                     visualTransformation = PasswordVisualTransformation(),
                 )
             }
@@ -328,33 +383,61 @@ fun SettingsScreen(
                 value = draft.ttsModel,
                 onValueChange = viewModel::updateTtsModel,
                 label = "TTS 模型",
-                placeholder = "tts-1 / gpt-4o-mini-tts / kokoro",
+                placeholder = "mimo-v2.5-tts / tts-1 / kokoro",
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            Field(
+                value = draft.ttsVoice,
+                onValueChange = viewModel::updateTtsVoice,
+                label = "音色",
+                placeholder = "mimo_default",
+                hint = if (draft.ttsProtocol == TtsProtocol.MIMO_CHAT) {
+                    "可填 mimo_default、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean"
+                } else {
+                    "如 alloy、nova；自建端点看它自己的音色表"
+                },
+            )
+
+            if (draft.ttsProtocol == TtsProtocol.MIMO_CHAT) {
                 Field(
-                    value = draft.ttsVoice,
-                    onValueChange = viewModel::updateTtsVoice,
-                    label = "音色",
-                    placeholder = "alloy",
-                    modifier = Modifier.weight(1f),
+                    value = draft.ttsStylePrompt,
+                    onValueChange = viewModel::updateTtsStylePrompt,
+                    label = "风格指令（可选）",
+                    placeholder = "温柔、稍慢的语调",
+                    hint = "MiMo 把合成文本放在 assistant 消息里，这句作为 user 指令控制语气/情绪/方言",
                 )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Field(
                     value = draft.ttsSpeed,
                     onValueChange = viewModel::updateTtsSpeed,
                     label = "语速",
                     placeholder = "1.0",
                     keyboardType = KeyboardType.Decimal,
+                    hint = if (draft.ttsProtocol == TtsProtocol.MIMO_CHAT) {
+                        "MiMo 没有数字语速参数，会折算成一句自然语言指令"
+                    } else {
+                        null
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                Field(
+                    value = draft.ttsFormat,
+                    onValueChange = viewModel::updateTtsFormat,
+                    label = "音频格式",
+                    placeholder = "wav",
                     modifier = Modifier.weight(1f),
                 )
             }
-
-            Field(
-                value = draft.ttsFormat,
-                onValueChange = viewModel::updateTtsFormat,
-                label = "音频格式",
-                placeholder = "mp3",
-                hint = "要和端点实际返回的格式一致，否则播放器解不出来",
+            Text(
+                text = if (draft.ttsProtocol == TtsProtocol.MIMO_CHAT) {
+                    "格式要和端点实际返回的一致。MiMo 非流式用 wav 最省事 —— 拿到的就是完整文件，不用再解码。"
+                } else {
+                    "格式要和端点实际返回的一致，否则播放器解不出来。"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             OutlinedButton(
@@ -652,6 +735,7 @@ private fun Field(
     placeholder: String? = null,
     hint: String? = null,
     numeric: Boolean = false,
+    enabled: Boolean = true,
     keyboardType: KeyboardType? = null,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     trailing: (@Composable () -> Unit)? = null,
@@ -663,6 +747,7 @@ private fun Field(
         placeholder = if (placeholder != null) ({ Text(placeholder) }) else null,
         supportingText = if (hint != null) ({ Text(hint) }) else null,
         singleLine = true,
+        enabled = enabled,
         keyboardOptions = KeyboardOptions(
             keyboardType = keyboardType ?: if (numeric) KeyboardType.Number else KeyboardType.Text
         ),
@@ -670,6 +755,65 @@ private fun Field(
         trailingIcon = trailing,
         modifier = modifier.fillMaxWidth(),
     )
+}
+
+/**
+ * 「协议」选择行。
+ *
+ * 常驻显示而不是藏在预设里：协议决定请求长什么样（multipart / base64 JSON / chat 补全），
+ * 排查问题时要能一眼看见现在发的是哪种，而不是去猜某个预设背后是什么。
+ */
+@Composable
+private fun <T> ProtocolRow(
+    label: String,
+    options: List<Pair<T, String>>,
+    selected: T,
+    onSelect: (T) -> Unit,
+    hint: String,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            options.forEach { (value, text) ->
+                FilterChip(
+                    selected = value == selected,
+                    onClick = { onSelect(value) },
+                    label = { Text(text) },
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = hint,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun AsrProtocol.label(): String = when (this) {
+    AsrProtocol.OPENAI -> "OpenAI 兼容"
+    AsrProtocol.BAILIAN_FUN_ASR -> "百炼 DashScope"
+}
+
+private fun AsrProtocol.hint(): String = when (this) {
+    AsrProtocol.OPENAI -> "multipart 上传音频到 /audio/transcriptions"
+    AsrProtocol.BAILIAN_FUN_ASR -> "音频以 base64 塞进 JSON，走 DashScope 的 multimodal-generation"
+}
+
+private fun TtsProtocol.label(): String = when (this) {
+    TtsProtocol.OPENAI -> "OpenAI 兼容"
+    TtsProtocol.MIMO_CHAT -> "MiMo 聊天补全"
+}
+
+private fun TtsProtocol.hint(): String = when (this) {
+    TtsProtocol.OPENAI -> "POST /audio/speech，响应体就是音频字节"
+    TtsProtocol.MIMO_CHAT -> "走 chat/completions，文本放 assistant 消息，音频 base64 在响应里"
 }
 
 private fun ThemeMode.label(): String = when (this) {
