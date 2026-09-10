@@ -1,9 +1,9 @@
 name: Android CI
 
 # 什么时候跑：
-#   · push 到主分支
-#   · 打 v 开头的标签（会发正式 Release，而不是 nightly）
-#   · 提 PR
+#   · 提 PR                 → 只跑 build-debug 做快速编译校验
+#   · push 到主分支          → 编 release 并发 nightly
+#   · 打 v 开头的标签        → 编 release 并发正式 Release（非预发布）
 #   · 手动点一下就跑（Actions 页面上的 Run workflow）
 on:
   push:
@@ -22,8 +22,10 @@ permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------- PR 快速编译校验
   build-debug:
-    name: 构建 debug APK
+    name: 构建 debug APK（PR 校验）
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -40,8 +42,6 @@ jobs:
       - name: 准备 Android SDK
         uses: android-actions/setup-android@v3
 
-      # 端侧资源（so + onnx 模型）已经入库；万一被清掉了或换成别处拉，
-      # 这一步会在缺失时自动补上，不会静默编出一个没有语音能力的 APK。
       - name: 确认端侧语音资源就位
         shell: bash
         run: |
@@ -61,37 +61,99 @@ jobs:
             echo "资源齐备，跳过下载。"
           fi
 
-      # 只借它做依赖缓存与构建扫描上报；Gradle 版本以仓库里的 wrapper 为准
-      # （不设 gradle-version，否则会多下一份同版本的发行包，纯属浪费）
       - name: 设置 Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # 本地没 SDK，编不了；先把最容易犯的「漏 import 扩展函数」这类错筛一遍，
-      # 免得编译到一半才报一堆 Unresolved reference。
       - name: 静态体检（漏 import / 资源清单）
         run: python3 tools/lint_imports.py
 
       - name: 编译
         run: ./gradlew assembleDebug --stacktrace
 
+  # ---------------------------------------------------- 发版用的 release 构建
+  build-release:
+    name: 构建 release APK
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 确认端侧语音资源就位
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          check() { [ -e "$1" ] || { echo "缺少：$1"; missing=1; }; }
+          check app/src/main/assets/silero_vad.onnx
+          check app/src/main/jniLibs/arm64-v8a/libsherpa-onnx-jni.so
+          check app/src/main/assets/kws/tokens.txt
+          ls app/src/main/assets/kws/encoder*.onnx >/dev/null 2>&1 || { echo "缺少：encoder*.onnx"; missing=1; }
+
+          if [ "$missing" -eq 1 ]; then
+            echo "::group::联网拉取端侧资源"
+            python3 tools/fetch_assets.py --abis arm64-v8a
+            echo "::endgroup::"
+          else
+            echo "资源齐备，跳过下载。"
+          fi
+
+      - name: 设置 Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 静态体检（漏 import / 资源清单）
+        run: python3 tools/lint_imports.py
+
+      # 签名（可选）：仓库配了 SIGNING_KEYSTORE_BASE64 等 secret 就解码并注入
+      # 环境变量，Gradle 据此给 release 包签名；没配则出未签名 release（仍可编）。
+      - name: 准备签名密钥（可选）
+        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
+        env:
+          B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KP: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          SP: ${{ secrets.SIGNING_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$B64" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+          {
+            echo "SIGNING_KEYSTORE=$RUNNER_TEMP/keystore.jks"
+            echo "SIGNING_KEY_ALIAS=$ALIAS"
+            echo "SIGNING_KEY_PASSWORD=$KP"
+            echo "SIGNING_STORE_PASSWORD=$SP"
+          } >> "$GITHUB_ENV"
+
+      - name: 编译 release
+        run: ./gradlew assembleRelease --stacktrace
+
       - name: 报告产物大小
         run: |
           set -euo pipefail
-          ls -lh app/build/outputs/apk/debug/*.apk
+          ls -lh app/build/outputs/apk/release/*.apk
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
-          name: PiAgent-debug
-          path: app/build/outputs/apk/debug/*.apk
-          # 没产物就直接失败，别给一个空的 artifact
+          name: PiAgent-release
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
 
   # ------------------------------------------------------------------ 发版
   publish-release:
     name: 发布到 GitHub Release
-    needs: build-debug
+    needs: build-release
     runs-on: ubuntu-latest
     # PR 不发版 —— 否则每个 PR 都往 Releases 里塞一个包
     if: github.event_name != 'pull_request'
@@ -105,7 +167,7 @@ jobs:
       - name: 取回 APK
         uses: actions/download-artifact@v4
         with:
-          name: PiAgent-debug
+          name: PiAgent-release
           path: apk
 
       - name: 定版本号与标签
@@ -125,7 +187,7 @@ jobs:
             echo "title=Nightly ${version} (#${GITHUB_RUN_NUMBER})" >> "$GITHUB_OUTPUT"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "apk_name=PiAgent-${version}-debug.apk" >> "$GITHUB_OUTPUT"
+          echo "apk_name=PiAgent-${version}.apk" >> "$GITHUB_OUTPUT"
 
       - name: 发 Release
         env:
@@ -140,12 +202,17 @@ jobs:
           mv apk/*.apk "apk/${APK_NAME}"
 
           cat > notes.md <<EOF
-          自动构建的 debug 包，未签名（可装，但只能靠 USB 调试安装）。
+          自动构建的 Release 包（已开启 R8 混淆 + 资源收缩）：
+          调试页与调试日志已从安装包中移除，体积更小、不可被调试。
 
           - 版本：${VERSION}
           - 构建号：#${GITHUB_RUN_NUMBER}
           - 提交：${GITHUB_SHA}
           - 工作流：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          说明：若仓库未配置签名密钥（SIGNING_KEYSTORE_BASE64 等 secret），
+          本包为「未签名 Release」，部分设备需通过 adb install 安装；
+          配置签名密钥后即变为可直接安装的已签名包。
           EOF
           # 去掉行首缩进（heredoc 保留了缩进）
           sed -i 's/^[[:space:]]*//' notes.md

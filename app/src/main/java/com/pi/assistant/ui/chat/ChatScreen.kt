@@ -1,5 +1,6 @@
 package com.pi.assistant.ui.chat
 
+import com.pi.assistant.BuildConfig
 import android.Manifest
 import android.content.pm.PackageManager
 import android.widget.Toast
@@ -126,8 +127,12 @@ fun ChatScreen(
                 title = { Text("pi 对话") },
                 actions = {
                     StatusChip(status = status, onRefresh = viewModel::refreshStatus)
-                    IconButton(onClick = onOpenDebug) {
-                        Icon(Icons.Filled.BugReport, contentDescription = "调试")
+                    // 调试入口只在 debug 构建显示；release 包里既看不到图标，
+                    // 也不会把 onOpenDebug 编进去。
+                    if (BuildConfig.DEBUG) {
+                        IconButton(onClick = onOpenDebug) {
+                            Icon(Icons.Filled.BugReport, contentDescription = "调试")
+                        }
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")

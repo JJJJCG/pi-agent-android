@@ -20,3 +20,16 @@
 -keepclassmembers class com.k2fsa.sherpa.onnx.** { *; }
 -dontwarn com.k2fsa.sherpa.onnx.**
 
+# ---------------------------------------------------------------- 发布版清理
+# 去掉调试日志（d/v）。i/w/e 保留，方便线上崩溃诊断。
+# R8 会据此把这两类调用从字节码里整个删掉，release 包里不再留痕。
+-assumenosideeffects class android.util.Log {
+    public static int d(java.lang.String, java.lang.String);
+    public static int d(java.lang.String, java.lang.String, java.lang.Throwable);
+    public static int v(java.lang.String, java.lang.String);
+    public static int v(java.lang.String, java.lang.String, java.lang.Throwable);
+}
+
+# ViewModel 子类保留：Hilt / 导航按类型反射查找实现，混淆后找不到会崩。
+-keep class * extends androidx.lifecycle.ViewModel { *; }
+

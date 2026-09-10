@@ -25,17 +25,37 @@ android {
         // 想给 APK 瘦身就在 tools/fetch_assets.py --abis 里只取 arm64-v8a。
     }
 
+    // 签名：仅当 CI 注入了密钥环境变量时才启用。
+    // 本地没配也能编出 release（只是未签名，需用 adb 装），不会卡住日常构建。
+    signingConfigs {
+        if (System.getenv("SIGNING_KEYSTORE") != null) {
+            create("release") {
+                storeFile = file(System.getenv("SIGNING_KEYSTORE")!!)
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"   // 可与正式包共存
             isMinifyEnabled = false
+            // debug 包刻意保留调试能力：可被附加调试器、日志全开
         }
         release {
-            isMinifyEnabled = false
+            // 发布版必须开启混淆 + 资源收缩：剔除 Log.d/v 调试日志、
+            // 未用代码，以及被 BuildConfig.DEBUG 挡住的调试页，显著瘦身。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (System.getenv("SIGNING_KEYSTORE") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
