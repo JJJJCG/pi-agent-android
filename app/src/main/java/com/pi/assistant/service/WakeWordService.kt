@@ -68,6 +68,13 @@ class WakeWordService : Service() {
     /** 同一轮内忽略重复唤醒，防止一句话被识别成两次。 */
     private var lastWakeAt = 0L
 
+    // 条件判断的缓存（见 conditionsSatisfied 的注释）
+    private var cachedConditions = false
+    private var cachedConditionsAt = 0L
+
+    /** 上一次推给通知栏的文案，用来去重。 */
+    private var lastNotifyText: String? = null
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -170,9 +177,33 @@ class WakeWordService : Service() {
 
     // ------------------------------------------------------------ 生效条件
 
+    /**
+     * 生效条件是否满足。
+     *
+     * 这个判断在 `shouldContinue` 里**每帧**都会被问到（512 样本 ≈ 32ms，
+     * 约 31 次/秒）。而底层那几个检查并不便宜：
+     *   · isCharging() 是一次 registerReceiver 的 Binder IPC
+     *   · isOnWifi() 是 ConnectivityManager 的两次 Binder IPC
+     *   · isWithinTimeWindow() 每次 new 一个 Calendar
+     * 合起来每秒近百次跨进程调用，而这些状态几秒内根本不会变 —— 纯烧电。
+     *
+     * 所以缓存结果，每 [CONDITION_CACHE_MS] 才真去查一次。
+     * 例外：`wakeEnabled` 是纯内存读，不缓存 —— 用户把开关关掉后要立刻停，
+     * 不能等缓存过期。
+     */
     private fun conditionsSatisfied(): Boolean {
+        if (!settings.current.wakeEnabled) return false
+
+        val now = SystemClock.elapsedRealtime()
+        if (now - cachedConditionsAt < CONDITION_CACHE_MS) return cachedConditions
+
+        cachedConditionsAt = now
+        cachedConditions = evaluateConditions()
+        return cachedConditions
+    }
+
+    private fun evaluateConditions(): Boolean {
         val snapshot = settings.current
-        if (!snapshot.wakeEnabled) return false
         if (snapshot.wakeOnlyCharging && !isCharging()) return false
         if (snapshot.wakeOnlyWifi && !isOnWifi()) return false
         return isWithinTimeWindow(snapshot)
@@ -270,6 +301,11 @@ class WakeWordService : Service() {
     }
 
     private fun notify(text: String) {
+        // 内容没变就别重建：buildNotification 要造两个 PendingIntent，
+        // notify 本身又是一次到 system_server 的 IPC。主循环里同一个文案
+        // 会被反复推（比如每轮结束都回到「在听唤醒词」），去重掉能省不少。
+        if (text == lastNotifyText) return
+        lastNotifyText = text
         runCatching {
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification(text))
         }
@@ -285,6 +321,9 @@ class WakeWordService : Service() {
         private const val WAKE_LOCKOUT_MS = 3_000L
         private const val CONDITION_RECHECK_MS = 15_000L
         private const val ERROR_BACKOFF_MS = 3_000L
+
+        /** 条件判断的缓存时长。充电/Wi-Fi 状态几秒内不会变，5 秒足够及时。 */
+        private const val CONDITION_CACHE_MS = 5_000L
 
         const val ACTION_STOP = "com.pi.assistant.action.STOP_WAKE"
 
