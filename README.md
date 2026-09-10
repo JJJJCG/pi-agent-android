@@ -57,6 +57,10 @@
 
 工作流里有几个刻意的设计：
 
+- 编译前先跑 `python3 tools/lint_imports.py`。这是给「本地没有 Android SDK、
+  编不了」这种情况准备的兜底：它专门扫 Compose 扩展函数**用了却没 import**
+  （`clickable` / `fillMaxWidth` / `collectAsState` 之类），
+  这类错在 Kotlin 里一次性会喷十条 `Unresolved reference`，在 CI 前置掉能省一轮往返。
 - 会先**校验端侧资源是否齐备**（`silero_vad.onnx` / `libsherpa-onnx-jni.so` / `encoder*.onnx` …）。
   资源已入库，正常情况下直接跳过；万一缺失就自动联网补齐 ——
   避免静默编出一个「能装但没语音能力」的 APK。
