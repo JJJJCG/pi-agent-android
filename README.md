@@ -76,7 +76,8 @@
 
 > **当前工程里已经拉好了**（`jniLibs/arm64-v8a` 4 个 so + `silero_vad.onnx` + `assets/kws/` 完整模型），
 > 手上这台机器跑 Android Studio 就能直接编。只有换机器、换 ABI 时才需要重跑；
-> 换唤醒词不用 —— 设置页里改完立即生效（App 内自动转拼音），脚本只是兜底。
+> 换唤醒词不归脚本管 —— 唤醒词已固定为打包词表里的「水蓝蓝」，要换就改
+> `assets/kws/keywords.txt` 后重新打包（App 内不支持自定义）。
 > 脚本对已存在的文件会跳过，不会重复下载。
 
 ```bash
@@ -89,8 +90,8 @@ python tools/fetch_assets.py --components vad
 # 想要模拟器也能跑：多抽一个 x86_64
 python tools/fetch_assets.py --components native --abis arm64-v8a,x86_64
 
-# 换打包内置的兜底唤醒词（日常改词请直接用设置页，无需此步）
-python tools/fetch_assets.py --components kws --keywords 小派同学,你好派
+# 换打包内置的唤醒词（需重新打包安装；App 内不支持自定义）
+python tools/fetch_assets.py --components kws --keywords 水蓝蓝
 
 # 只看现状
 python tools/fetch_assets.py --check
@@ -114,7 +115,7 @@ python tools/fetch_assets.py --check
 >   所以上游换模型版本、文件名带上 `-epoch-12-avg-2-chunk-16-left-64` 这种后缀也不会失效。
 > - `keywords.txt` 和模型自带的 `keywords_model.txt` 要分清：前者是真正生效的唤醒词，
 >   格式是 ppinyin（一个汉字 = 声母 + 韵母，韵母带声调），可用音素都在 `tokens.txt` 里。
->   本工程已内置 `小派同学 / 小派小派 / 你好派`，重跑脚本不会覆盖它。
+>   本工程已内置 `水蓝蓝`，重跑脚本不会覆盖它。
 
 ### 2.3 填配置
 
@@ -204,7 +205,7 @@ App → 设置：
 - [ ] `dumpsys meminfo com.pi.assistant`：唤醒关闭 + 进后台 30s 后，PSS 低于改动前（A6/A7）
 - [ ] 进后台 8s 再回前台，聊天列表和发消息都正常（A6 的 Room close）
 - [ ] `adb shell ls /data/data/com.pi.assistant/cache` 里没有 `utt_*` / `tts_*` 残留（A8）
-- [ ] 设置里改唤醒词（含多音字词），保存后新词能唤醒、旧词不再响应；转不出的词回退打包词表（日志有 WakeKeywords 记录）
+- [ ] 开启唤醒后喊「水蓝蓝」能唤醒；设置页「后台唤醒」里显示固定提示「唤醒词：水蓝蓝」，无可编辑输入框
 - [ ] 「隐私 → 隐藏最近任务卡片」开启后最近任务看不到本应用，关闭后恢复
 - [ ] 息屏 8 小时稳定唤醒、误唤醒 < 1 次/小时（回归）
 
@@ -225,8 +226,7 @@ com.pi.assistant/
     AudioRecorder.kt         AudioRecord 最薄封装（VOICE_RECOGNITION / 16k / mono）
     WavWriter.kt             边录边写 WAV，close 时回填长度字段
     VadRecorder.kt           VAD 断句录音（说完自动停）
-    KwsEngine.kt             关键词唤醒监听循环
-    WakeKeywords.kt          唤醒词→按流词表文本（带调拼音 token，失败回退打包词表）
+    KwsEngine.kt             关键词唤醒监听循环（唤醒词固定「水蓝蓝」，见 assets/kws/keywords.txt）
     AudioFocusHelper.kt      音频焦点
     TtsPlayer.kt             MediaPlayer 播放（挂起直到播完）
     ToneCue.kt               唤醒提示音

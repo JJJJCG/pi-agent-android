@@ -24,11 +24,15 @@ import javax.inject.Singleton
  * 选它的理由很实际：中文开箱即用、换唤醒词只改一个文本文件、零训练成本，
  * 而且跟 VAD 共用同一个 native 库，不多一份 so。
  *
+ * 唤醒词固定为打包词表 assets/kws/keywords.txt 里的「水蓝蓝」
+ * （[PiSettings.WAKE_WORD] 只用于界面提示）。曾经的「设置里改词、运行时
+ * 转拼音换按流词表」方案在实际设备上不生效，已整体移除 —— 要换词就改
+ * keywords.txt 重新打包，词表格式见该文件头注释。
+ *
  * 模型生命周期（后台占用优化 A1）：
  *   KeywordSpotter 不持有麦克风，加载一次要读三个 onnx + 建会话，是几百 ms 的
  *   CPU 尖峰 —— 所以把它从「一次 listen」提升到「服务的生命周期」，只在配置
- *   （阈值 / 线程数）变化时重建。唤醒词不参与重建：它走 createStream(keywords)
- *   的按流词表（见 [WakeKeywords]），改词即时生效，不用动模型。
+ *   （阈值 / 线程数）变化时重建。
  *   AudioRecord 仍然每轮释放（要跟 VadRecorder 抢设备），两者在这里解耦。
  */
 @Singleton
@@ -108,8 +112,7 @@ class KwsEngine @Inject constructor(
                         modelType = "zipformer2",
                     ),
                     maxActivePaths = 4,
-                    // 打包词表只用于满足初始化要求；真正生效的唤醒词
-                    // 由 listen() 里 createStream(keywords) 按流传入
+                    // 生效词表就是这份打包的 keywords.txt（唤醒词「水蓝蓝」）
                     keywordsFile = paths.keywords,
                     keywordsScore = snapshot.kwsScore,
                     keywordsThreshold = snapshot.kwsThreshold,
@@ -150,11 +153,7 @@ class KwsEngine @Inject constructor(
             return@withContext
         }
 
-        // 按流词表：设置里的唤醒词（可多个，逗号隔开）即时生效；
-        // null = 转不出拼音，建流时传空串回退打包词表
-        val kwText = WakeKeywords.forSettings(context, settings.current.wakeKeyword)
-
-        var stream: OnlineStream? = newStream(spotter, kwText)
+        var stream: OnlineStream? = newStream(spotter)
         val buffer = ShortArray(AudioRecorder.CHUNK)
         val floats = FloatArray(AudioRecorder.CHUNK)
 
@@ -176,7 +175,7 @@ class KwsEngine @Inject constructor(
                         onKeyword(keyword)
                         // 命中后换一条干净的流：否则残留状态可能反复触发同一个词
                         runCatching { current.release() }
-                        stream = newStream(spotter, kwText)
+                        stream = newStream(spotter)
                         break
                     }
                 }
@@ -192,24 +191,7 @@ class KwsEngine @Inject constructor(
         }
     }
 
-    /**
-     * 建流。带按流词表时优先把设置里的唤醒词传给 native —— 老版本 .so 没有这个
-     * JNI 入口时会抛 NoSuchMethodError，这里兜住并退回打包词表，只回退一次。
-     */
-    @Volatile private var perStreamKeywordsBroken = false
-
-    private fun newStream(spotter: KeywordSpotter, kwText: String?): OnlineStream {
-        if (!kwText.isNullOrEmpty() && !perStreamKeywordsBroken) {
-            try {
-                return spotter.createStream(kwText)
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                perStreamKeywordsBroken = true
-                Log.w(TAG, "createStream(keywords) 不受当前 .so 支持，回退打包词表", t)
-            }
-        }
-        return spotter.createStream()
-    }
+    private fun newStream(spotter: KeywordSpotter): OnlineStream = spotter.createStream()
 
     private companion object {
         const val TAG = "KwsEngine"

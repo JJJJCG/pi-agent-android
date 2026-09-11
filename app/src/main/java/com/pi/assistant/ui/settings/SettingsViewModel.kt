@@ -79,7 +79,6 @@ data class SettingsDraft(
     val maxRecordSeconds: String = "15",
 
     // 唤醒
-    val wakeKeyword: String = "小派同学",
     val kwsScore: String = "1.5",
     val kwsThreshold: String = "0.25",
     val kwsThreads: String = "1",
@@ -214,7 +213,6 @@ class SettingsViewModel @Inject constructor(
     fun updateVadSilence(value: String) = mutate { it.copy(vadMinSilenceMs = value.digits(4)) }
     fun updateMaxRecord(value: String) = mutate { it.copy(maxRecordSeconds = value.digits(3)) }
 
-    fun updateWakeKeyword(value: String) = mutate { it.copy(wakeKeyword = value) }
     fun updateKwsScore(value: String) = mutate { it.copy(kwsScore = value) }
     fun updateKwsThreshold(value: String) = mutate { it.copy(kwsThreshold = value) }
     fun updateKwsThreads(value: String) = mutate { it.copy(kwsThreads = value.digits(1)) }
@@ -268,7 +266,6 @@ class SettingsViewModel @Inject constructor(
                 maxRecordSeconds = draft.maxRecordSeconds.toIntOrNull()?.coerceIn(3, 60) ?: 15,
 
                 wakeEnabled = settings.current.wakeEnabled,
-                wakeKeyword = draft.wakeKeyword.trim().ifBlank { "小派同学" },
                 kwsScore = draft.kwsScore.toFloatOrNull()?.coerceIn(0.1f, 10f) ?: 1.5f,
                 kwsThreshold = draft.kwsThreshold.toFloatOrNull()?.coerceIn(0.01f, 0.9f) ?: 0.25f,
                 kwsThreads = draft.kwsThreads.toIntOrNull()?.coerceIn(1, 4) ?: 1,
@@ -471,7 +468,6 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     vadThreshold = vadThreshold.toString(),
     vadMinSilenceMs = vadMinSilenceMs.toString(),
     maxRecordSeconds = maxRecordSeconds.toString(),
-    wakeKeyword = wakeKeyword,
     kwsScore = kwsScore.toString(),
     kwsThreshold = kwsThreshold.toString(),
     kwsThreads = kwsThreads.toString(),

@@ -431,11 +431,11 @@ fun SettingsScreen(
                 NoticeCard(text = "唤醒功能不可用：$it", isError = true)
             }
 
-            Field(
-                value = draft.wakeKeyword,
-                onValueChange = viewModel::updateWakeKeyword,
-                label = "唤醒词",
-                hint = "多个用逗号隔开，保存后立即生效（自动转拼音）；多音字读不准就换个写法",
+            // 唤醒词内置在打包词表里（assets/kws/keywords.txt），不可改
+            Text(
+                text = "唤醒词：${PiSettings.WAKE_WORD}",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {

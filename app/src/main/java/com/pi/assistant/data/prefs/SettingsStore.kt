@@ -86,7 +86,6 @@ data class PiSettings(
 
     // ---- 关键词唤醒
     val wakeEnabled: Boolean = false,
-    val wakeKeyword: String = "小派同学",
     val kwsScore: Float = 1.5f,
     val kwsThreshold: Float = 0.25f,
     /** KWS 推理线程数。流式小模型 1 线程基本不掉点，默认 1 省一半 CPU。 */
@@ -105,11 +104,10 @@ data class PiSettings(
     /** 地址填了才发得出去请求。 */
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
-    /** 唤醒词，逗号分隔，允许配多个。 */
-    val wakeKeywords: List<String>
-        get() = wakeKeyword.split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
-
     companion object {
+        /** 唤醒词固定为打包词表里的「水蓝蓝」，界面只做提示，不可改。 */
+        const val WAKE_WORD = "水蓝蓝"
+
         const val DEFAULT_BASE_URL = "http://192.168.31.145:9901"
         const val DEFAULT_TIMEOUT_SEC = 120
         const val TIMEOUT_MIN = 1

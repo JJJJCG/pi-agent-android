@@ -15,8 +15,8 @@ android {
         applicationId = "com.pi.assistant"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.3.1-m3"
+        versionCode = 3
+        versionName = "0.3.2-m3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -135,8 +135,6 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.androidx.security.crypto)
-    // 唤醒词 → 带调拼音（WakeKeywords），纯数据表无反射，R8 可正常收缩
-    implementation(libs.pinyin4j)
 
     implementation(libs.markwon.core)
     implementation(libs.markwon.tables)
