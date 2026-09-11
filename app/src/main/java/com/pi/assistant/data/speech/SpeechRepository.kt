@@ -3,6 +3,7 @@ package com.pi.assistant.data.speech
 import android.content.Context
 import android.util.Base64
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import com.pi.assistant.data.net.HttpClients
 import com.pi.assistant.data.prefs.MimoSpeech
 import com.pi.assistant.data.prefs.SettingsStore
 import com.pi.assistant.util.MarkdownStripper
@@ -12,11 +13,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import java.io.File
 import java.io.OutputStream
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -30,11 +29,13 @@ sealed interface SpeechResult<out T> {
  * 语音识别与合成，都走小米 MiMo。
  *
  * 两条链路共用同一个 `chat/completions` 端点和同一份 key，所以客户端只缓存一份。
+ * OkHttpClient 从 [HttpClients] 的根 client 派生（A7），不再自己另起一套线程池。
  */
 @Singleton
 class SpeechRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settings: SettingsStore,
+    private val clients: HttpClients,
 ) {
 
     // ------------------------------------------------------------------ 识别
