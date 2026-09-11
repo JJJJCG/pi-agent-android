@@ -217,24 +217,7 @@ class SpeechRepository @Inject constructor(
     }
 
     private fun build(baseUrl: String, token: String): MimoSpeechApi {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            // 长音频识别和整段合成都可能慢，给足时间
-            .callTimeout(180, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder().apply {
-                    if (token.isNotBlank()) {
-                        addHeader("Authorization", "Bearer $token")
-                        // MiMo 的两份官方示例鉴权头不一致：curl 写的是 `api-key`，
-                        // Python(OpenAI SDK) 走 Authorization。既然都可能，就两个都带上 ——
-                        // 值相同不会冲突，也省得在真机上试错。
-                        addHeader("api-key", token)
-                    }
-                }.build()
-                chain.proceed(request)
-            }
-            .build()
+        val client = clients.forSpeech(token)
 
         return Retrofit.Builder()
             .baseUrl(baseUrl.trimEnd('/') + "/")
