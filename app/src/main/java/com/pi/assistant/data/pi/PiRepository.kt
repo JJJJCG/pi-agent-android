@@ -34,6 +34,13 @@ class PiRepository @Inject constructor(
     /** 最近一次请求的原始判定，Debug 页直接展示。 */
     val lastCall: StateFlow<CallRecord?> = _lastCall.asStateFlow()
 
+    /** `/v1/status` 能力位（是否支持流式）的缓存，见 [supportsStream]。 */
+    @Volatile
+    private var streamCapable: Boolean? = null
+
+    @Volatile
+    private var streamProbedAt = 0L
+
     /**
      * 问一句，阻塞拿回答。所有异常都在这里被翻译成 [PiResult]，绝不外泄。
      *
@@ -137,6 +144,179 @@ class PiRepository @Inject constructor(
         }
     }
 
+    // ------------------------------------------------------------ 流式对话
+
+    /**
+     * 流式问一句：pi 一边写，[onDelta] 一边收到**增量**文本。
+     *
+     * 返回的仍是 [PiResult]，和 [ask] 同构 —— 上层（VoiceSession）沿用同一套错误
+     * 分支，不必为流式再写一遍状态机。
+     *
+     * @param voiceTurn 这一问来自语音：带上 `hint=voice`，让 pi 按口语稿回
+     * @param onDelta 增量回调（是**新增**的文本，不是全文）；在读取协程里执行，别做重活
+     */
+    suspend fun askStream(
+        text: String,
+        timeoutSec: Int = settings.current.timeoutSec,
+        voiceTurn: Boolean = false,
+        onDelta: suspend (String) -> Unit = {},
+    ): PiResult {
+        if (!settings.current.isConfigured) return PiResult.NotConfigured("pi 地址")
+        // 老 pi 没有这个端点：直接走整段，别白试一次 404
+        if (!supportsStream()) return ask(text, timeoutSec)
+        return withContext(Dispatchers.IO) { streamOnce(text, timeoutSec, voiceTurn, onDelta) }
+    }
+
+    /**
+     * pi 是否支持 `/v1/chat/stream`（`/v1/status` 的能力位）。
+     *
+     * 结果缓存 [STREAM_CAP_TTL_MS] —— 能力位是「pi 版本」的属性，不会来回变。
+     * 而且每次 status 查询都会顺带刷新它（见 [statusOrNull]），
+     * 所以界面进聊天页那次 `refreshStatus()` 已经把缓存捂热，这里通常不发请求。
+     */
+    suspend fun supportsStream(): Boolean {
+        val cached = streamCapable
+        val fresh = SystemClock.elapsedRealtime() - streamProbedAt < STREAM_CAP_TTL_MS
+        if (cached != null && fresh) return cached
+
+        return withContext(Dispatchers.IO) {
+            val capable = try {
+                factory.api().status().body()?.stream == true
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                // 探测本身失败：按不支持处理，走整段模式总不会错
+                false
+            }
+            streamCapable = capable
+            streamProbedAt = SystemClock.elapsedRealtime()
+            capable
+        }
+    }
+
+    /**
+     * 跑一次流式请求。与 [attempt] 的分工：这里只管流，遇到「整段模式能处理得更好」
+     * 的情况就交给它（复用那套 401/409/503/504 状态机）。
+     */
+    private suspend fun streamOnce(
+        text: String,
+        timeoutSec: Int,
+        voiceTurn: Boolean,
+        onDelta: suspend (String) -> Unit,
+    ): PiResult {
+        val started = SystemClock.elapsedRealtime()
+        val response = try {
+            factory.streamApi().chatStream(
+                ChatRequest(
+                    text = text,
+                    timeout = timeoutSec,
+                    hint = if (voiceTurn) HINT_VOICE else null,
+                )
+            )
+        } catch (e: IOException) {
+            val ms = SystemClock.elapsedRealtime() - started
+            record(null, null, "Unavailable", ms, "流式请求发不出去：网络异常", e.message)
+            return PiResult.Unavailable(retryable = true)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            val ms = SystemClock.elapsedRealtime() - started
+            record(null, "client_error", "Failed", ms, "客户端异常", e.message)
+            return PiResult.Failed(0, "client_error", e.message ?: e::class.java.simpleName)
+        }
+
+        /*
+         * 非 200 一律退回整段模式重来一次，两种情况都落这一支：
+         *   · pi 太老，根本没有 /v1/chat/stream → 404
+         *   · 401 / 409 / 503 / 504 —— 整段那条路的状态机已经写全了
+         *     （409/503 各自重试一次、504 先查 busy 再决定），复用它比自己再抄一遍可靠。
+         */
+        if (!response.isSuccessful) {
+            val ms = SystemClock.elapsedRealtime() - started
+            record(
+                response.code(), null, "Fallback", ms,
+                "流式端点不可用（HTTP ${response.code()}），退回整段模式", null,
+            )
+            return attempt(text, timeoutSec, retriesLeft = 1)
+        }
+
+        val body = response.body()
+        if (body == null) {
+            val ms = SystemClock.elapsedRealtime() - started
+            record(response.code(), null, "Fallback", ms, "流式响应没有响应体，退回整段模式", null)
+            return attempt(text, timeoutSec, retriesLeft = 1)
+        }
+
+        var reply = ""
+        var tools: Int? = null
+        var serverMs: Long? = null
+        var deltaChars = 0
+        var failure: PiEvent.Failure? = null
+        var end = StreamEnd.Truncated
+        var broken: String? = null
+
+        try {
+            end = body.source().use { source ->
+                readPiEvents(source, PiClientFactory.json) { event ->
+                    when (event) {
+                        is PiEvent.Delta -> {
+                            deltaChars += event.text.length
+                            onDelta(event.text)
+                        }
+
+                        is PiEvent.Done -> {
+                            reply = event.reply
+                            tools = event.tools
+                            serverMs = event.ms
+                        }
+
+                        is PiEvent.Failure -> failure = event
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            // 读了一半断了（读超时 / 网络掉线）：已经吐出来的部分照常算数，
+            // 由下面的分支决定是重试还是如实报错
+            broken = e.message ?: e::class.java.simpleName
+        }
+
+        val ms = SystemClock.elapsedRealtime() - started
+
+        failure?.let { f ->
+            // 「pi 说没起过」+「我们一个字都没收到」双重确认才敢重来：
+            // 已经念出去半句再重试，用户会把开头听两遍。
+            if (!f.started && deltaChars == 0) {
+                record(
+                    f.httpStatus, f.code, "Fallback", ms,
+                    "流式 error(started=false) 且无 delta，退回整段重试一次", f.message,
+                )
+                return attempt(text, timeoutSec, retriesLeft = 0)
+            }
+            record(f.httpStatus, f.code, "Failed", ms, "流式 error(started=true)，不重试", f.message)
+            return PiResult.Failed(f.httpStatus ?: 0, f.code, f.message ?: "流式回复中断")
+        }
+
+        if (end == StreamEnd.Done) {
+            if (reply.isBlank()) {
+                record(200, null, "Failed", ms, "流式 done 的 reply 是空的", null)
+                return PiResult.Failed(200, null, "空回复（done 里没有内容）")
+            }
+            record(
+                200, null, "Ok(stream)", ms,
+                "delta ${deltaChars} 字 · tools=$tools · serverMs=$serverMs", null,
+            )
+            return PiResult.Ok(reply, tools, serverMs)
+        }
+
+        val note = broken ?: "连接在 [DONE] 之前就结束了"
+        if (deltaChars == 0) {
+            // 一个字都没收到，当没跑过：让上层可以整轮重来
+            record(null, null, "Unavailable", ms, "流式连接中断且没收到内容：$note", null)
+            return PiResult.Unavailable(retryable = true)
+        }
+        record(null, "stream_truncated", "Failed", ms, "流式回复不完整：$note", null)
+        return PiResult.Failed(0, "stream_truncated", "回复没说完就断了")
+    }
+
     /** `GET /healthz`，免鉴权探活。 */
     suspend fun probe(): ProbeResult = withContext(Dispatchers.IO) {
         val started = SystemClock.elapsedRealtime()
@@ -158,7 +338,14 @@ class PiRepository @Inject constructor(
     /** 结构化 status；失败返回 null。 */
     suspend fun statusOrNull(): PiStatus? = withContext(Dispatchers.IO) {
         try {
-            factory.api().status().body()
+            val body = factory.api().status().body()
+            // 本来就在拉 /v1/status，顺手把流式能力位的缓存刷新掉 ——
+            // 省掉每轮语音对话前专门探一次能力的那次请求
+            body?.let {
+                streamCapable = it.stream == true
+                streamProbedAt = SystemClock.elapsedRealtime()
+            }
+            body
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             null
@@ -224,5 +411,11 @@ class PiRepository @Inject constructor(
             ignoreUnknownKeys = true
             explicitNulls = false
         }
+
+        /** 语音来源的回合带上它，pi 会按口语稿回（短、无代码块/表格/裸链接）。 */
+        const val HINT_VOICE = "voice"
+
+        /** 流式能力位的缓存时长。能力位是 pi 版本的属性，10 分钟足够保守。 */
+        const val STREAM_CAP_TTL_MS = 10 * 60 * 1000L
     }
 }

@@ -45,6 +45,32 @@ class HttpClients @Inject constructor(
             .build()
     }
 
+    /**
+     * pi bridge · 流式对话（`/v1/chat/stream`）。
+     *
+     * 和 [forPi] 的差别在超时：**不设 callTimeout**。
+     * 一轮回答可能好几分钟（还要排在前一轮后面等），任何固定的总超时都会在
+     * 用户正听着的时候把连接掐掉。卡死由 readTimeout 兜底 ——
+     * pi 在静默期（排队 / 等首 token / 跑工具）每 10 秒发一行 `: ping`，
+     * 所以 45 秒没有任何字节是明确异常。
+     *
+     * `Accept` 用 `header()` 覆盖而不是 `addHeader()`：根 client 不收 Accept，
+     * 但显式声明 SSE 能让中间的反代知道别攒批。
+     */
+    fun forPiStream(): OkHttpClient = root.newBuilder()
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
+        // 流已经消费了一半再重试只会把前半句念两遍，交给上层判断
+        .retryOnConnectionFailure(false)
+        .addInterceptor { chain ->
+            val token = settings.current.token
+            val b = chain.request().newBuilder().header("Accept", "text/event-stream")
+            if (token.isNotBlank()) b.addHeader("Authorization", "Bearer $token")
+            chain.proceed(b.build())
+        }
+        .build()
+
     /** MiMo 语音。长音频识别和整段合成都慢，单独给足时间。 */
     fun forSpeech(token: String): OkHttpClient = root.newBuilder()
         .callTimeout(180, TimeUnit.SECONDS)

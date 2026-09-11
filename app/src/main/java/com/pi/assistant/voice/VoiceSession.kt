@@ -15,6 +15,7 @@ import com.pi.assistant.data.speech.SpeechResult
 import com.pi.assistant.util.MarkdownStripper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -47,9 +48,13 @@ class VoiceSession @Inject constructor(
 
     private val busy = AtomicBoolean(false)
 
+    /** 当前正在跑的流式朗读队列（没有则 null），[stopSpeaking] 靠它做到「点停就停」。 */
+    @Volatile
+    private var currentQueue: SpeechQueue? = null
+
     /** 录音期间失去音频焦点 → 停播放，把声道让出去。 */
     init {
-        focus.onFocusLost = { speaker.stop() }
+        focus.onFocusLost = { stopSpeaking() }
     }
 
     val isBusy: Boolean get() = busy.get()
@@ -115,8 +120,14 @@ class VoiceSession @Inject constructor(
         }
     }
 
-    /** 打断当前朗读。流式和整段两条路都要停 —— 停错一条等于没停。 */
+    /**
+     * 打断当前朗读。
+     *
+     * 两条路都要停：流式队列（还要顺带把后续 delta 静音，不然停了又接着念）
+     * 和整段播放器。
+     */
     fun stopSpeaking() {
+        currentQueue?.stop()
         speaker.stop()
     }
 
@@ -168,20 +179,12 @@ class VoiceSession @Inject constructor(
             val userRow = dao.insert(MessageEntity(role = ROLE_USER, text = text))
 
             bus.setStage(VoiceStage.ASKING)
-            when (val answer = pi.ask(text)) {
-                is PiResult.Ok -> {
-                    dao.insert(
-                        MessageEntity(
-                            role = ROLE_PI,
-                            text = answer.reply,
-                            tools = answer.tools,
-                            ms = answer.ms,
-                        )
-                    )
-                    bus.setHeadline(MarkdownStripper.preview(answer.reply, 80))
-                    speakInternal(answer.reply)
-                }
+            // 能流式就边收边念：pi 吐一句，这边合成一句、播一句。
+            // 落库放在回调里 —— 播放还没结束就该在聊天列表里看到这条回复。
+            val answer = askAndSpeak(text) { ok -> storeReply(ok) }
 
+            when (answer) {
+                is PiResult.Ok -> Unit   // 落库与朗读都在 askAndSpeak 里完成了
                 is PiResult.StillRunning -> bus.setError(answer.hint)
 
                 PiResult.AuthError -> {
@@ -201,7 +204,12 @@ class VoiceSession @Inject constructor(
 
                 is PiResult.Failed -> {
                     dao.setFailed(userRow, true)
-                    bus.setError("pi 返回 HTTP ${answer.httpCode}")
+                    // 流式的中途失败未必有 HTTP 码（可能是 SSE 里的 error 帧），
+                    // 所以优先信服务端给的那句话
+                    bus.setError(
+                        answer.msg?.takeIf { it.isNotBlank() }
+                            ?: "pi 返回 HTTP ${answer.httpCode}"
+                    )
                 }
             }
         } catch (t: Throwable) {
@@ -217,6 +225,73 @@ class VoiceSession @Inject constructor(
     }
 
     // ------------------------------------------------------------------ 内部
+
+    /**
+     * 问 pi 并朗读回答：**能流式就边收边念**（pi 吐一句，这边合成一句、播一句）。
+     *
+     * 与整段模式的差别都收在这一个函数里，上层照旧只处理 [PiResult]：
+     *   · [onReply] 在**拿到完整回复时就回调**，早于播放结束 ——
+     *     用户还在听的时候，聊天列表里就该有这条回复了
+     *   · 一个 delta 都没流过（pi 不支持流式 / 起播失败退回整段）时由这里补念，
+     *     上层不用关心「到底念过没有」
+     */
+    private suspend fun askAndSpeak(
+        text: String,
+        onReply: suspend (PiResult.Ok) -> Unit,
+    ): PiResult = coroutineScope {
+        val queue = SpeechQueue(speaker, this)
+        currentQueue = queue
+
+        var streamed = false
+        val result = try {
+            pi.askStream(text, voiceTurn = true) { delta ->
+                if (!streamed) {
+                    // 第一段文本到手才真的开始出声，这时切状态才不算撒谎
+                    streamed = true
+                    bus.setStage(VoiceStage.SPEAKING)
+                }
+                queue.feed(delta)
+            }
+        } catch (t: Throwable) {
+            // 异常退出：把消费者协程一起收掉，否则 coroutineScope 会一直等它
+            queue.stop()
+            currentQueue = null
+            throw t
+        }
+
+        var audioError: String? = null
+        try {
+            if (result is PiResult.Ok) onReply(result)
+        } finally {
+            currentQueue = null
+            // 到这里 pi 已经说完（或失败）。等队列把音频放完再返回 ——
+            // 调用方靠这个保证「还在出声时绝不恢复麦克风采集」
+            audioError = queue.finish()
+        }
+
+        if (result is PiResult.Ok) {
+            val err = audioError
+            when {
+                err != null -> bus.setError(err)
+                // 没流过任何 delta → 说明走的是整段模式，这里补念
+                !streamed -> speakInternal(result.reply)
+            }
+        }
+        result
+    }
+
+    /** 落库 + 顶栏概要。语音进来的回答和手打的一视同仁。 */
+    private suspend fun storeReply(reply: PiResult.Ok) {
+        dao.insert(
+            MessageEntity(
+                role = ROLE_PI,
+                text = reply.reply,
+                tools = reply.tools,
+                ms = reply.ms,
+            )
+        )
+        bus.setHeadline(MarkdownStripper.preview(reply.reply, 80))
+    }
 
     private suspend fun speakInternal(text: String) {
         if (MarkdownStripper.strip(text).isBlank()) return
