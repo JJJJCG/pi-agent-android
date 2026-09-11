@@ -81,6 +81,8 @@ data class SettingsDraft(
     val wakeKeyword: String = "小派同学",
     val kwsScore: String = "1.5",
     val kwsThreshold: String = "0.25",
+    val kwsThreads: String = "1",
+    val kwsProvider: String = "cpu",
     val wakeOnlyCharging: Boolean = false,
     val wakeOnlyWifi: Boolean = false,
     val wakeStartHour: String = PiSettings.HOUR_ANY.toString(),
@@ -196,6 +198,8 @@ class SettingsViewModel @Inject constructor(
     fun updateWakeKeyword(value: String) = mutate { it.copy(wakeKeyword = value) }
     fun updateKwsScore(value: String) = mutate { it.copy(kwsScore = value) }
     fun updateKwsThreshold(value: String) = mutate { it.copy(kwsThreshold = value) }
+    fun updateKwsThreads(value: String) = mutate { it.copy(kwsThreads = value.digits(1)) }
+    fun updateKwsProvider(value: String) = mutate { it.copy(kwsProvider = value) }
     fun toggleWakeCharging() = mutate { it.copy(wakeOnlyCharging = !it.wakeOnlyCharging) }
     fun toggleWakeWifi() = mutate { it.copy(wakeOnlyWifi = !it.wakeOnlyWifi) }
     fun updateWakeStart(value: String) = mutate { it.copy(wakeStartHour = value) }
@@ -440,6 +444,8 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     wakeKeyword = wakeKeyword,
     kwsScore = kwsScore.toString(),
     kwsThreshold = kwsThreshold.toString(),
+    kwsThreads = kwsThreads.toString(),
+    kwsProvider = kwsProvider,
     wakeOnlyCharging = wakeOnlyCharging,
     wakeOnlyWifi = wakeOnlyWifi,
     wakeStartHour = wakeStartHour.toString(),

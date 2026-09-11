@@ -89,6 +89,10 @@ data class PiSettings(
     val wakeKeyword: String = "小派同学",
     val kwsScore: Float = 1.5f,
     val kwsThreshold: Float = 0.25f,
+    /** KWS 推理线程数。流式小模型 1 线程基本不掉点，默认 1 省一半 CPU。 */
+    val kwsThreads: Int = 1,
+    /** onnxruntime 的 provider：cpu / nnapi。失败自动回退 cpu（见 KwsEngine.build）。 */
+    val kwsProvider: String = "cpu",
     val wakeOnlyCharging: Boolean = false,
     val wakeOnlyWifi: Boolean = false,
     val wakeStartHour: Int = HOUR_ANY,

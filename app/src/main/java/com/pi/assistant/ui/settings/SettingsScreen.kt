@@ -442,6 +442,26 @@ fun SettingsScreen(
                 )
             }
 
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Field(
+                    value = draft.kwsThreads,
+                    onValueChange = viewModel::updateKwsThreads,
+                    label = "推理线程数",
+                    placeholder = "1",
+                    numeric = true,
+                    hint = "1 线程基本不掉点，省一半 CPU（1~4）",
+                    modifier = Modifier.weight(1f),
+                )
+                Field(
+                    value = draft.kwsProvider,
+                    onValueChange = viewModel::updateKwsProvider,
+                    label = "推理后端",
+                    placeholder = "cpu",
+                    hint = "cpu / nnapi；nnapi 不支持时自动回退 cpu",
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
             SwitchRow(
                 label = "仅充电时监听",
                 checked = draft.wakeOnlyCharging,

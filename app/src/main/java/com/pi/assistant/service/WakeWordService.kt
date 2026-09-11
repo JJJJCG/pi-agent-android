@@ -39,7 +39,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import javax.inject.Inject
-import kotlin.coroutines.coroutineContext
+
 /**
  * 后台常驻的唤醒服务。
  *
@@ -68,6 +68,12 @@ class WakeWordService : Service() {
     /** 同一轮内忽略重复唤醒，防止一句话被识别成两次。 */
     private var lastWakeAt = 0L
 
+    /** 连续出错次数，驱动指数退避（见主循环的 Error 分支）。 */
+    private var errorStreak = 0
+
+    /** 当前是否处于前台优先级（决定 leaveForeground 要不要动手）。 */
+    private var inForeground = false
+
     // 条件判断的缓存（见 conditionsSatisfied 的注释）
     private var cachedConditions = false
     private var cachedConditionsAt = 0L
@@ -88,7 +94,7 @@ class WakeWordService : Service() {
         }
 
         // 必须在 5 秒内进入前台，否则直接 ANR/被杀
-        startForegroundCompat(buildNotification("正在启动…"))
+        enterForeground()
 
         kwsEngine.unavailableReason()?.let { reason ->
             bus.setError(reason)
@@ -105,6 +111,7 @@ class WakeWordService : Service() {
 
     override fun onDestroy() {
         bus.setServiceRunning(false)
+        runCatching { kwsEngine.release() }   // 服务没了，模型跟着走（A1）
         scope.cancel()
         loopJob = null
         super.onDestroy()
@@ -121,45 +128,65 @@ class WakeWordService : Service() {
 
             while (isActive) {
                 if (!conditionsSatisfied()) {
+                    // 条件不满足：主动降级出前台，让进程能被当成普通后台回收（A4）
+                    leaveForeground()
                     bus.setHeadline(conditionHint())
                     bus.setStage(VoiceStage.IDLE)
                     notify("条件不满足，暂不监听")
                     delay(CONDITION_RECHECK_MS)
                     continue
                 }
+                enterForeground()
 
                 bus.setStage(VoiceStage.WAITING_WAKE)
                 bus.setHeadline(null)
                 notify("在听唤醒词")
 
-                val keyword = listenUntilHit()
+                when (val outcome = listenUntilHit()) {
+                    is ListenResult.Hit -> {
+                        errorStreak = 0
+                        Log.i(TAG, "命中唤醒词：${outcome.keyword}")
+                        bus.onWake(outcome.keyword)
+                        notify("正在处理…")
+                        // 此时 listen() 已返回，麦克风已释放，可以安全录音
+                        voiceSession.runWakeTurn()
+                        notify("在听唤醒词")
+                    }
 
-                if (keyword != null) {
-                    Log.i(TAG, "命中唤醒词：$keyword")
-                    bus.onWake(keyword)
-                    notify("正在处理…")
-                    // 此时 listen() 已返回，麦克风已释放，可以安全录音
-                    voiceSession.runWakeTurn()
-                    notify("在听唤醒词")
-                } else if (isActive) {
-                    // 出错退避后重来，别疯狂重试
-                    delay(ERROR_BACKOFF_MS)
+                    ListenResult.Error -> {
+                        if (!isActive) break
+                        // 指数退避：麦克风被占用时不再每 3 秒炸一次（A2）
+                        val backoff = (ERROR_BACKOFF_MS shl errorStreak).coerceAtMost(MAX_BACKOFF_MS)
+                        errorStreak++
+                        Log.w(TAG, "监听出错，连续第 $errorStreak 次，退避 ${backoff}ms")
+                        delay(backoff)
+                    }
+
+                    // 条件变了或被取消，不算错
+                    ListenResult.Stopped -> errorStreak = 0
                 }
             }
         }
     }
 
+    /** 监听一趟的三种结局。null 语义被拆开：出错和「条件变了」要区别对待。 */
+    private sealed interface ListenResult {
+        data class Hit(val keyword: String) : ListenResult
+        data object Error : ListenResult
+        data object Stopped : ListenResult
+    }
+
     /**
-     * 跑一趟监听，命中一个唤醒词就返回那个词（并让麦克风随之释放）。
-     * 出错 / 被取消 / 条件变化都返回 null。
+     * 跑一趟监听。命中返回 Hit，出错返回 Error，条件变化/被取消返回 Stopped。
      */
-    private suspend fun listenUntilHit(): String? {
+    private suspend fun listenUntilHit(): ListenResult {
         var hit: String? = null
-        // 显式取协程的 isActive：在 lambda 里直接写 isActive 会解析到 CoroutineScope.isActive，
-        // 而 lambda 的接收者不是 CoroutineScope，导致歧义。
-        val alive = coroutineContext.isActive
+        var errored = false
+
         kwsEngine.listen(
-            shouldContinue = { alive && hit == null && conditionsSatisfied() },
+            // C1：不再快照 coroutineContext.isActive —— 那在函数入口求值一次、
+            // 恒为 true，纯误导。真正响应取消的是 KwsEngine 循环里的 isActive。
+            shouldContinue = { hit == null && conditionsSatisfied() },
             onKeyword = { keyword ->
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastWakeAt >= WAKE_LOCKOUT_MS) {
@@ -168,11 +195,45 @@ class WakeWordService : Service() {
                 }
             },
             onError = { message ->
+                errored = true
                 bus.setError(message)
                 notify(message)
             },
         )
-        return hit
+
+        val keyword = hit
+        return when {
+            keyword != null -> ListenResult.Hit(keyword)
+            errored -> ListenResult.Error
+            else -> ListenResult.Stopped
+        }
+    }
+
+    // ------------------------------------------------------------ 前台降级（A4）
+
+    private fun enterForeground() {
+        if (inForeground) return
+        startForegroundCompat(buildNotification("在听唤醒词"))
+        inForeground = true
+        lastNotifyText = "在听唤醒词"
+    }
+
+    /**
+     * 退出前台状态，让进程降为普通后台（可被回收），但服务与循环继续。
+     *
+     * Android 13+ 用 DETACH：通知留在抽屉里、用户能划掉，服务不受影响。
+     * 13 以下只能 REMOVE：通知会整个消失，条件恢复时 enterForeground() 会重新贴一条。
+     */
+    private fun leaveForeground() {
+        if (!inForeground) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+            } else {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+        }.onFailure { Log.w(TAG, "退出前台失败", it) }
+        inForeground = false
     }
 
     // ------------------------------------------------------------ 生效条件
@@ -319,8 +380,11 @@ class WakeWordService : Service() {
         private const val REQ_STOP = 1002
 
         private const val WAKE_LOCKOUT_MS = 3_000L
-        private const val CONDITION_RECHECK_MS = 15_000L
+
+        /** 条件本身就是几分钟级的变化，30s 复查一次足够（15s 没必要）。 */
+        private const val CONDITION_RECHECK_MS = 30_000L
         private const val ERROR_BACKOFF_MS = 3_000L
+        private const val MAX_BACKOFF_MS = 60_000L
 
         /** 条件判断的缓存时长。充电/Wi-Fi 状态几秒内不会变，5 秒足够及时。 */
         private const val CONDITION_CACHE_MS = 5_000L

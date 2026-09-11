@@ -8,6 +8,7 @@ import com.k2fsa.sherpa.onnx.KeywordSpotterConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.pi.assistant.data.prefs.PiSettings
 import com.pi.assistant.data.prefs.SettingsStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -22,12 +23,23 @@ import javax.inject.Singleton
  *
  * 选它的理由很实际：中文开箱即用、换唤醒词只改一个文本文件、零训练成本，
  * 而且跟 VAD 共用同一个 native 库，不多一份 so。
+ *
+ * 模型生命周期（后台占用优化 A1）：
+ *   KeywordSpotter 不持有麦克风，加载一次要读三个 onnx + 建会话，是几百 ms 的
+ *   CPU 尖峰 —— 所以把它从「一次 listen」提升到「服务的生命周期」，只在配置
+ *   （唤醒词 / 阈值 / 线程数 / provider）变化时重建。AudioRecord 仍然每轮释放
+ *   （要跟 VadRecorder 抢设备），两者在这里解耦。
  */
 @Singleton
 class KwsEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settings: SettingsStore,
 ) {
+    private val lock = Any()
+
+    /** 服务存活期间复用同一个 spotter —— 模型只加载一次。 */
+    @Volatile private var spotter: KeywordSpotter? = null
+    @Volatile private var spotterKey: String? = null
 
     /** null 表示可用；否则是给用户看的原因。 */
     fun unavailableReason(): String? {
@@ -35,6 +47,80 @@ class KwsEngine @Inject constructor(
         val missing = VoiceAssets.missingForKws(context)
         return if (missing.isEmpty()) null
         else "assets 里缺：${missing.joinToString("、")}（跑 tools 里的取模型脚本）"
+    }
+
+    /**
+     * 取一个可用的 spotter。只有配置变了才重建（唤醒词 / 阈值 / 线程数 / provider）。
+     *
+     * 快路径无锁读：key 一致直接复用。主循环每轮都会进来一次，
+     * 别为这件事去抢锁。
+     */
+    private fun obtain(): KeywordSpotter? {
+        val snapshot = settings.current
+        val key = configKey(snapshot)
+
+        spotter?.takeIf { spotterKey == key }?.let { return it }
+        return synchronized(lock) {
+            spotter?.takeIf { spotterKey == key } ?: run {
+                releaseLocked()                                   // 配置变了，先拆旧的
+                build(snapshot)?.also { spotter = it; spotterKey = key }
+            }
+        }
+    }
+
+    private fun configKey(snapshot: PiSettings): String = listOf(
+        snapshot.wakeKeyword,
+        snapshot.kwsScore,
+        snapshot.kwsThreshold,
+        snapshot.kwsThreads,
+        snapshot.kwsProvider,
+    ).joinToString("|")
+
+    /** 释放模型。由服务的 onDestroy 调用，平时不要动。 */
+    fun release() = synchronized(lock) { releaseLocked() }
+
+    private fun releaseLocked() {
+        runCatching { spotter?.release() }
+        spotter = null
+        spotterKey = null
+    }
+
+    private fun build(snapshot: PiSettings): KeywordSpotter? {
+        val paths = VoiceAssets.resolveKws(context) ?: return null
+        // provider 建不起来就退回 cpu（NNAPI 在部分 ROM 上直接失败）
+        for (provider in listOf(snapshot.kwsProvider, "cpu").distinct()) {
+            val made = runCatching {
+                KeywordSpotter(
+                    assetManager = context.assets,
+                    config = KeywordSpotterConfig(
+                        featConfig = FeatureConfig(
+                            sampleRate = AudioRecorder.SAMPLE_RATE,
+                            featureDim = 80,
+                        ),
+                        modelConfig = OnlineModelConfig(
+                            transducer = OnlineTransducerModelConfig(
+                                encoder = paths.encoder,
+                                decoder = paths.decoder,
+                                joiner = paths.joiner,
+                            ),
+                            tokens = paths.tokens,
+                            numThreads = snapshot.kwsThreads,
+                            provider = provider,
+                            modelType = "zipformer2",
+                        ),
+                        maxActivePaths = 4,
+                        keywordsFile = paths.keywords,
+                        keywordsScore = snapshot.kwsScore,
+                        keywordsThreshold = snapshot.kwsThreshold,
+                        numTrailingBlanks = 2,
+                    ),
+                )
+            }.onFailure {
+                Log.w(TAG, "provider=$provider 初始化失败，换下一个", it)
+            }.getOrNull()
+            if (made != null) return made
+        }
+        return null
     }
 
     /**
@@ -48,54 +134,20 @@ class KwsEngine @Inject constructor(
         onKeyword: (String) -> Unit,
         onError: (String) -> Unit = {},
     ) = withContext(Dispatchers.Default) {
-        val reason = unavailableReason()
-        if (reason != null) {
-            onError(reason)
+        unavailableReason()?.let {
+            onError(it)
             return@withContext
         }
 
-        val snapshot = settings.current
-        val paths = VoiceAssets.resolveKws(context)
-        if (paths == null) {
-            onError("找不到关键词模型：" + VoiceAssets.missingForKws(context).joinToString("、"))
-            return@withContext
-        }
-
-        val spotter = try {
-            KeywordSpotter(
-                assetManager = context.assets,
-                config = KeywordSpotterConfig(
-                    featConfig = FeatureConfig(
-                        sampleRate = AudioRecorder.SAMPLE_RATE,
-                        featureDim = 80,
-                    ),
-                    modelConfig = OnlineModelConfig(
-                        transducer = OnlineTransducerModelConfig(
-                            encoder = paths.encoder,
-                            decoder = paths.decoder,
-                            joiner = paths.joiner,
-                        ),
-                        tokens = paths.tokens,
-                        numThreads = 2,
-                        provider = "cpu",
-                        modelType = "zipformer2",
-                    ),
-                    maxActivePaths = 4,
-                    keywordsFile = paths.keywords,
-                    keywordsScore = snapshot.kwsScore,
-                    keywordsThreshold = snapshot.kwsThreshold,
-                    numTrailingBlanks = 2,
-                ),
-            )
-        } catch (t: Throwable) {
-            Log.w(TAG, "KWS 初始化失败", t)
-            onError("唤醒引擎初始化失败：${t.message ?: t::class.java.simpleName}")
+        val spotter = obtain()
+        if (spotter == null) {
+            onError("唤醒引擎初始化失败：模型或 assets 不可用")
             return@withContext
         }
 
         val recorder = AudioRecorder()
         if (!recorder.start()) {
-            runCatching { spotter.release() }
+            // 注意：麦克风打不开不等于模型坏了，spotter 留着
             onError("麦克风打不开（权限被拒或被别的 App 占用）")
             return@withContext
         }
@@ -132,9 +184,9 @@ class KwsEngine @Inject constructor(
             Log.w(TAG, "KWS 循环异常", t)
             onError("唤醒监听中断：${t.message ?: t::class.java.simpleName}")
         } finally {
-            recorder.close()
-            runCatching { stream?.release() }
-            runCatching { spotter.release() }
+            recorder.close()                    // 麦克风必须释放
+            runCatching { stream?.release() }   // 流每轮换新的
+            // spotter 不 release —— 归服务生命周期管
         }
     }
 
