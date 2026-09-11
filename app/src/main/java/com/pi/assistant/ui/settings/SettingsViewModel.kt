@@ -82,11 +82,13 @@ data class SettingsDraft(
     val kwsScore: String = "1.5",
     val kwsThreshold: String = "0.25",
     val kwsThreads: String = "1",
-    val kwsProvider: String = "cpu",
     val wakeOnlyCharging: Boolean = false,
     val wakeOnlyWifi: Boolean = false,
     val wakeStartHour: String = PiSettings.HOUR_ANY.toString(),
     val wakeEndHour: String = PiSettings.HOUR_ANY.toString(),
+
+    // 隐私
+    val hideRecents: Boolean = false,
 
     // 仅界面态
     val tokenVisible: Boolean = false,
@@ -199,9 +201,9 @@ class SettingsViewModel @Inject constructor(
     fun updateKwsScore(value: String) = mutate { it.copy(kwsScore = value) }
     fun updateKwsThreshold(value: String) = mutate { it.copy(kwsThreshold = value) }
     fun updateKwsThreads(value: String) = mutate { it.copy(kwsThreads = value.digits(1)) }
-    fun updateKwsProvider(value: String) = mutate { it.copy(kwsProvider = value) }
     fun toggleWakeCharging() = mutate { it.copy(wakeOnlyCharging = !it.wakeOnlyCharging) }
     fun toggleWakeWifi() = mutate { it.copy(wakeOnlyWifi = !it.wakeOnlyWifi) }
+    fun toggleHideRecents() = mutate { it.copy(hideRecents = !it.hideRecents) }
     fun updateWakeStart(value: String) = mutate { it.copy(wakeStartHour = value) }
     fun updateWakeEnd(value: String) = mutate { it.copy(wakeEndHour = value) }
 
@@ -251,10 +253,12 @@ class SettingsViewModel @Inject constructor(
                 wakeKeyword = draft.wakeKeyword.trim().ifBlank { "小派同学" },
                 kwsScore = draft.kwsScore.toFloatOrNull()?.coerceIn(0.1f, 10f) ?: 1.5f,
                 kwsThreshold = draft.kwsThreshold.toFloatOrNull()?.coerceIn(0.01f, 0.9f) ?: 0.25f,
+                kwsThreads = draft.kwsThreads.toIntOrNull()?.coerceIn(1, 4) ?: 1,
                 wakeOnlyCharging = draft.wakeOnlyCharging,
                 wakeOnlyWifi = draft.wakeOnlyWifi,
                 wakeStartHour = draft.wakeStartHour.toIntOrNull() ?: PiSettings.HOUR_ANY,
                 wakeEndHour = draft.wakeEndHour.toIntOrNull() ?: PiSettings.HOUR_ANY,
+                hideRecents = draft.hideRecents,
             )
         )
 
@@ -445,9 +449,9 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     kwsScore = kwsScore.toString(),
     kwsThreshold = kwsThreshold.toString(),
     kwsThreads = kwsThreads.toString(),
-    kwsProvider = kwsProvider,
     wakeOnlyCharging = wakeOnlyCharging,
     wakeOnlyWifi = wakeOnlyWifi,
     wakeStartHour = wakeStartHour.toString(),
     wakeEndHour = wakeEndHour.toString(),
+    hideRecents = hideRecents,
 )

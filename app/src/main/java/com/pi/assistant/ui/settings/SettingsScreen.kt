@@ -419,7 +419,7 @@ fun SettingsScreen(
                 value = draft.wakeKeyword,
                 onValueChange = viewModel::updateWakeKeyword,
                 label = "唤醒词",
-                hint = "多个用逗号隔开。改完要重跑 tools 里的生成脚本，见 README",
+                hint = "多个用逗号隔开，保存后立即生效（自动转拼音）；多音字读不准就换个写法",
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -442,25 +442,14 @@ fun SettingsScreen(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Field(
-                    value = draft.kwsThreads,
-                    onValueChange = viewModel::updateKwsThreads,
-                    label = "推理线程数",
-                    placeholder = "1",
-                    numeric = true,
-                    hint = "1 线程基本不掉点，省一半 CPU（1~4）",
-                    modifier = Modifier.weight(1f),
-                )
-                Field(
-                    value = draft.kwsProvider,
-                    onValueChange = viewModel::updateKwsProvider,
-                    label = "推理后端",
-                    placeholder = "cpu",
-                    hint = "cpu / nnapi；nnapi 不支持时自动回退 cpu",
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            Field(
+                value = draft.kwsThreads,
+                onValueChange = viewModel::updateKwsThreads,
+                label = "推理线程数",
+                placeholder = "1",
+                numeric = true,
+                hint = "1 线程基本不掉点，省一半 CPU（1~4）",
+            )
 
             SwitchRow(
                 label = "仅充电时监听",
@@ -523,6 +512,17 @@ fun SettingsScreen(
                     )
                 }
             }
+
+            // ----------------------------------------------------------- 隐私
+            Spacer(Modifier.height(4.dp))
+            SectionTitle("隐私")
+
+            SwitchRow(
+                label = "隐藏最近任务卡片",
+                hint = "开启后，系统最近任务里不再显示本应用的预览卡片",
+                checked = draft.hideRecents,
+                onToggle = { viewModel.toggleHideRecents() },
+            )
 
             // ----------------------------------------------------------- 数据
             Spacer(Modifier.height(4.dp))

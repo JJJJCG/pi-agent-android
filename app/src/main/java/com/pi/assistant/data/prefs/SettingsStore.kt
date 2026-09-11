@@ -91,12 +91,14 @@ data class PiSettings(
     val kwsThreshold: Float = 0.25f,
     /** KWS 推理线程数。流式小模型 1 线程基本不掉点，默认 1 省一半 CPU。 */
     val kwsThreads: Int = 1,
-    /** onnxruntime 的 provider：cpu / nnapi。失败自动回退 cpu（见 KwsEngine.build）。 */
-    val kwsProvider: String = "cpu",
     val wakeOnlyCharging: Boolean = false,
     val wakeOnlyWifi: Boolean = false,
     val wakeStartHour: Int = HOUR_ANY,
     val wakeEndHour: Int = HOUR_ANY,
+
+    // ---- 隐私
+    /** 最近任务里不显示本应用的卡片。 */
+    val hideRecents: Boolean = false,
 ) {
     /** 地址填了才发得出去请求。 */
     val isConfigured: Boolean get() = baseUrl.isNotBlank()

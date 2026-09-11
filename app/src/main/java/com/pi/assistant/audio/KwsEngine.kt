@@ -27,8 +27,9 @@ import javax.inject.Singleton
  * 模型生命周期（后台占用优化 A1）：
  *   KeywordSpotter 不持有麦克风，加载一次要读三个 onnx + 建会话，是几百 ms 的
  *   CPU 尖峰 —— 所以把它从「一次 listen」提升到「服务的生命周期」，只在配置
- *   （唤醒词 / 阈值 / 线程数 / provider）变化时重建。AudioRecord 仍然每轮释放
- *   （要跟 VadRecorder 抢设备），两者在这里解耦。
+ *   （阈值 / 线程数）变化时重建。唤醒词不参与重建：它走 createStream(keywords)
+ *   的按流词表（见 [WakeKeywords]），改词即时生效，不用动模型。
+ *   AudioRecord 仍然每轮释放（要跟 VadRecorder 抢设备），两者在这里解耦。
  */
 @Singleton
 class KwsEngine @Inject constructor(
@@ -50,7 +51,7 @@ class KwsEngine @Inject constructor(
     }
 
     /**
-     * 取一个可用的 spotter。只有配置变了才重建（唤醒词 / 阈值 / 线程数 / provider）。
+     * 取一个可用的 spotter。只有配置变了才重建（阈值 / 线程数）。
      *
      * 快路径无锁读：key 一致直接复用。主循环每轮都会进来一次，
      * 别为这件事去抢锁。
@@ -69,11 +70,9 @@ class KwsEngine @Inject constructor(
     }
 
     private fun configKey(snapshot: PiSettings): String = listOf(
-        snapshot.wakeKeyword,
         snapshot.kwsScore,
         snapshot.kwsThreshold,
         snapshot.kwsThreads,
-        snapshot.kwsProvider,
     ).joinToString("|")
 
     /** 释放模型。由服务的 onDestroy 调用，平时不要动。 */
@@ -87,40 +86,39 @@ class KwsEngine @Inject constructor(
 
     private fun build(snapshot: PiSettings): KeywordSpotter? {
         val paths = VoiceAssets.resolveKws(context) ?: return null
-        // provider 建不起来就退回 cpu（NNAPI 在部分 ROM 上直接失败）
-        for (provider in listOf(snapshot.kwsProvider, "cpu").distinct()) {
-            val made = runCatching {
-                KeywordSpotter(
-                    assetManager = context.assets,
-                    config = KeywordSpotterConfig(
-                        featConfig = FeatureConfig(
-                            sampleRate = AudioRecorder.SAMPLE_RATE,
-                            featureDim = 80,
-                        ),
-                        modelConfig = OnlineModelConfig(
-                            transducer = OnlineTransducerModelConfig(
-                                encoder = paths.encoder,
-                                decoder = paths.decoder,
-                                joiner = paths.joiner,
-                            ),
-                            tokens = paths.tokens,
-                            numThreads = snapshot.kwsThreads,
-                            provider = provider,
-                            modelType = "zipformer2",
-                        ),
-                        maxActivePaths = 4,
-                        keywordsFile = paths.keywords,
-                        keywordsScore = snapshot.kwsScore,
-                        keywordsThreshold = snapshot.kwsThreshold,
-                        numTrailingBlanks = 2,
+        // NNAPI 已移除：流式小模型动态 shape 在 NNAPI EP 上经常编译失败，
+        // 收益又不明显（8 Gen 3 单线程 CPU 已经很轻），固定 cpu。
+        return runCatching {
+            KeywordSpotter(
+                assetManager = context.assets,
+                config = KeywordSpotterConfig(
+                    featConfig = FeatureConfig(
+                        sampleRate = AudioRecorder.SAMPLE_RATE,
+                        featureDim = 80,
                     ),
-                )
-            }.onFailure {
-                Log.w(TAG, "provider=$provider 初始化失败，换下一个", it)
-            }.getOrNull()
-            if (made != null) return made
-        }
-        return null
+                    modelConfig = OnlineModelConfig(
+                        transducer = OnlineTransducerModelConfig(
+                            encoder = paths.encoder,
+                            decoder = paths.decoder,
+                            joiner = paths.joiner,
+                        ),
+                        tokens = paths.tokens,
+                        numThreads = snapshot.kwsThreads,
+                        provider = "cpu",
+                        modelType = "zipformer2",
+                    ),
+                    maxActivePaths = 4,
+                    // 打包词表只用于满足初始化要求；真正生效的唤醒词
+                    // 由 listen() 里 createStream(keywords) 按流传入
+                    keywordsFile = paths.keywords,
+                    keywordsScore = snapshot.kwsScore,
+                    keywordsThreshold = snapshot.kwsThreshold,
+                    numTrailingBlanks = 2,
+                ),
+            )
+        }.onFailure {
+            Log.w(TAG, "KeywordSpotter 初始化失败", it)
+        }.getOrNull()
     }
 
     /**
@@ -152,7 +150,11 @@ class KwsEngine @Inject constructor(
             return@withContext
         }
 
-        var stream: OnlineStream? = spotter.createStream()
+        // 按流词表：设置里的唤醒词（可多个，逗号隔开）即时生效；
+        // null = 转不出拼音，建流时传空串回退打包词表
+        val kwText = WakeKeywords.forSettings(context, settings.current.wakeKeyword)
+
+        var stream: OnlineStream? = newStream(spotter, kwText)
         val buffer = ShortArray(AudioRecorder.CHUNK)
         val floats = FloatArray(AudioRecorder.CHUNK)
 
@@ -174,7 +176,7 @@ class KwsEngine @Inject constructor(
                         onKeyword(keyword)
                         // 命中后换一条干净的流：否则残留状态可能反复触发同一个词
                         runCatching { current.release() }
-                        stream = spotter.createStream()
+                        stream = newStream(spotter, kwText)
                         break
                     }
                 }
@@ -188,6 +190,25 @@ class KwsEngine @Inject constructor(
             runCatching { stream?.release() }   // 流每轮换新的
             // spotter 不 release —— 归服务生命周期管
         }
+    }
+
+    /**
+     * 建流。带按流词表时优先把设置里的唤醒词传给 native —— 老版本 .so 没有这个
+     * JNI 入口时会抛 NoSuchMethodError，这里兜住并退回打包词表，只回退一次。
+     */
+    @Volatile private var perStreamKeywordsBroken = false
+
+    private fun newStream(spotter: KeywordSpotter, kwText: String?): OnlineStream {
+        if (!kwText.isNullOrEmpty() && !perStreamKeywordsBroken) {
+            try {
+                return spotter.createStream(kwText)
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                perStreamKeywordsBroken = true
+                Log.w(TAG, "createStream(keywords) 不受当前 .so 支持，回退打包词表", t)
+            }
+        }
+        return spotter.createStream()
     }
 
     private companion object {

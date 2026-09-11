@@ -75,7 +75,8 @@
 ### 2.2 补齐端侧语音资源
 
 > **当前工程里已经拉好了**（`jniLibs/arm64-v8a` 4 个 so + `silero_vad.onnx` + `assets/kws/` 完整模型），
-> 手上这台机器跑 Android Studio 就能直接编。只有换机器、换 ABI，或想改唤醒词时才需要重跑。
+> 手上这台机器跑 Android Studio 就能直接编。只有换机器、换 ABI 时才需要重跑；
+> 换唤醒词不用 —— 设置页里改完立即生效（App 内自动转拼音），脚本只是兜底。
 > 脚本对已存在的文件会跳过，不会重复下载。
 
 ```bash
@@ -88,7 +89,7 @@ python tools/fetch_assets.py --components vad
 # 想要模拟器也能跑：多抽一个 x86_64
 python tools/fetch_assets.py --components native --abis arm64-v8a,x86_64
 
-# 换唤醒词
+# 换打包内置的兜底唤醒词（日常改词请直接用设置页，无需此步）
 python tools/fetch_assets.py --components kws --keywords 小派同学,你好派
 
 # 只看现状
@@ -203,7 +204,8 @@ App → 设置：
 - [ ] `dumpsys meminfo com.pi.assistant`：唤醒关闭 + 进后台 30s 后，PSS 低于改动前（A6/A7）
 - [ ] 进后台 8s 再回前台，聊天列表和发消息都正常（A6 的 Room close）
 - [ ] `adb shell ls /data/data/com.pi.assistant/cache` 里没有 `utt_*` / `tts_*` 残留（A8）
-- [ ] provider 切到 nnapi 后仍能唤醒；机型不支持时日志能看到回退到 cpu（A5）
+- [ ] 设置里改唤醒词（含多音字词），保存后新词能唤醒、旧词不再响应；转不出的词回退打包词表（日志有 WakeKeywords 记录）
+- [ ] 「隐私 → 隐藏最近任务卡片」开启后最近任务看不到本应用，关闭后恢复
 - [ ] 息屏 8 小时稳定唤醒、误唤醒 < 1 次/小时（回归）
 
 > 耗电用 `adb shell dumpsys batterystats` 跑一晚，配 Battery Historian 看 KWS 期间的持续 CPU%，
@@ -224,6 +226,7 @@ com.pi.assistant/
     WavWriter.kt             边录边写 WAV，close 时回填长度字段
     VadRecorder.kt           VAD 断句录音（说完自动停）
     KwsEngine.kt             关键词唤醒监听循环
+    WakeKeywords.kt          唤醒词→按流词表文本（带调拼音 token，失败回退打包词表）
     AudioFocusHelper.kt      音频焦点
     TtsPlayer.kt             MediaPlayer 播放（挂起直到播完）
     ToneCue.kt               唤醒提示音
