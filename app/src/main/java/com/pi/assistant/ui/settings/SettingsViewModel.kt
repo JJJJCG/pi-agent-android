@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
@@ -377,9 +378,15 @@ class SettingsViewModel @Inject constructor(
     fun setWakeEnabled(enabled: Boolean) {
         // 开启前先落盘，服务起来就会读到刚改的阈值和生效条件
         if (enabled) saveAll(showToast = false)
-        _toast.value = when (val result = wakeControl.set(enabled, skippedConfigSave = enabled)) {
-            is WakeControl.Result.Ok -> result.message
-            is WakeControl.Result.Failed -> result.message
+        // 离开主线程：set() 里会 stopService()，是一次带 Binder 往返的服务派发
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                wakeControl.set(enabled, skippedConfigSave = enabled)
+            }
+            _toast.value = when (result) {
+                is WakeControl.Result.Ok -> result.message
+                is WakeControl.Result.Failed -> result.message
+            }
         }
     }
 

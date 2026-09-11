@@ -59,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -274,7 +275,15 @@ private fun WakeSwitchChip(
     Surface(
         shape = RoundedCornerShape(50),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.clickable(enabled = enabled) { onToggle(!checked) },
+        // toggleable 一次只发一个事件。之前是外层 clickable + 内层 Switch
+        // 各自回调 —— 点一下可能触发两次 onToggle，等于「关了又立刻开」，
+        // 两个 set() 撞在一起。Switch 只负责显示（见下）。
+        modifier = Modifier.toggleable(
+            value = checked,
+            enabled = enabled,
+            role = Role.Switch,
+            onValueChange = onToggle,
+        ),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -287,7 +296,8 @@ private fun WakeSwitchChip(
             )
             Switch(
                 checked = checked,
-                onCheckedChange = if (enabled) onToggle else null,
+                // null = 纯展示，不再自己处理点击；点整块区域由上面的 toggleable 接管
+                onCheckedChange = null,
                 enabled = enabled,
                 modifier = Modifier
                     .padding(start = 6.dp)

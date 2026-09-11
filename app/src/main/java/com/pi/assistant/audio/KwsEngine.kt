@@ -46,6 +46,52 @@ class KwsEngine @Inject constructor(
     @Volatile private var spotter: KeywordSpotter? = null
     @Volatile private var spotterKey: String? = null
 
+    /**
+     * 监听循环是否还在跑。
+     *
+     * 这是 [release] 与 `listen()` 之间唯一的握手信号，存在的理由很致命：
+     * `spotter.release()` 是 native 调用，一旦它在 `isReady()` / `decode()`
+     * 还在同一个 native 句柄上跑的时候被调掉，就是 use-after-free → SIGSEGV。
+     * 这种崩溃 `runCatching` 接不住（连 catch(Throwable) 都不行），进程直接没，
+     * 用户看到的就是「关监听闪退」。
+     *
+     * 所以 release 之前必须拿到这个锁，确保循环已经整个退出（见 listen 的
+     * finally：退出时把 running 置回 false 并通知）。
+     */
+    private val loopLock = Object()
+    private var loopRunning = false
+
+    /**
+     * 释放模型。由服务的 onDestroy 调用，平时不要动。
+     *
+     * **会阻塞**到监听循环彻底退出为止 —— 调用方绝不能在主线程上调它，
+     * 否则就是一次「关开关 → 主线程卡住 → ANR」的重演。
+     */
+    fun release() {
+        awaitLoopExit()
+        synchronized(lock) { releaseLocked() }
+    }
+
+    /**
+     * 等监听循环退出。最多等 [LOOP_EXIT_TIMEOUT_MS]，超时也放行 ——
+     * 万一循环卡在 native read 里出不来，宁可冒险释放，也不能把服务
+     * 停止流程永久挂死。
+     */
+    private fun awaitLoopExit() {
+        synchronized(loopLock) {
+            if (!loopRunning) return
+            runCatching { loopLock.wait(LOOP_EXIT_TIMEOUT_MS) }
+        }
+    }
+
+    /** 循环退出时由 listen 的 finally 调用，唤醒可能正在等待的 [release]。 */
+    private fun signalLoopExit() {
+        synchronized(loopLock) {
+            loopRunning = false
+            loopLock.notifyAll()
+        }
+    }
+
     /** null 表示可用；否则是给用户看的原因。 */
     fun unavailableReason(): String? {
         if (!SherpaNative.available) return SherpaNative.reason
@@ -78,9 +124,6 @@ class KwsEngine @Inject constructor(
         snapshot.kwsThreshold,
         snapshot.kwsThreads,
     ).joinToString("|")
-
-    /** 释放模型。由服务的 onDestroy 调用，平时不要动。 */
-    fun release() = synchronized(lock) { releaseLocked() }
 
     private fun releaseLocked() {
         runCatching { spotter?.release() }
@@ -140,17 +183,33 @@ class KwsEngine @Inject constructor(
             return@withContext
         }
 
+        // 从这一刻起到 finally 里的 signalLoopExit()，spotter 都在被本循环使用。
+        // 打上标记后，release() 就会一直等到这里收尾干净才动手释放 native 句柄。
+        synchronized(loopLock) { loopRunning = true }
+
+        try {
+            listenLoop(shouldContinue, onKeyword, onError)
+        } finally {
+            signalLoopExit()
+        }
+    }
+
+    private suspend fun listenLoop(
+        shouldContinue: () -> Boolean,
+        onKeyword: (String) -> Unit,
+        onError: (String) -> Unit,
+    ) {
         val spotter = obtain()
         if (spotter == null) {
             onError("唤醒引擎初始化失败：模型或 assets 不可用")
-            return@withContext
+            return
         }
 
         val recorder = AudioRecorder()
         if (!recorder.start()) {
             // 注意：麦克风打不开不等于模型坏了，spotter 留着
             onError("麦克风打不开（权限被拒或被别的 App 占用）")
-            return@withContext
+            return
         }
 
         var stream: OnlineStream? = newStream(spotter)
@@ -195,5 +254,14 @@ class KwsEngine @Inject constructor(
 
     private companion object {
         const val TAG = "KwsEngine"
+
+        /**
+         * release() 等监听循环退出的上限。
+         *
+         * 循环每 32ms 看一眼 shouldContinue，正常退出是毫秒级；留 2 秒是给
+         * 「刚好卡在 native read 里」这种极端情况兜底。超时仍会释放 ——
+         * 赌一次 use-after-free，也好过服务停不掉、麦克风一直亮着。
+         */
+        const val LOOP_EXIT_TIMEOUT_MS = 2_000L
     }
 }

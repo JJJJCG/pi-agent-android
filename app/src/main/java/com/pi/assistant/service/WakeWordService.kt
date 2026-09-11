@@ -40,6 +40,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Calendar
+import java.util.concurrent.Executors
 import javax.inject.Inject
 
 /**
@@ -64,6 +65,17 @@ class WakeWordService : Service() {
     @Inject lateinit var bus: VoiceBus
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * 专门用来收尾释放 native 模型的单线程执行器。
+     *
+     * 为什么不能直接用协程：service 的 scope 此刻已经被 cancel 了，
+     * 在里面 launch 什么都不会跑。而 release() 又必须离开主线程。
+     * 单线程还顺带保证了「释放」这件事永远串行，不会两次 release 撞在一起。
+     */
+    private val releaseExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "kws-release").apply { isDaemon = true }
+    }
 
     private var loopJob: Job? = null
 
@@ -113,9 +125,20 @@ class WakeWordService : Service() {
 
     override fun onDestroy() {
         bus.setServiceRunning(false)
-        runCatching { kwsEngine.release() }   // 服务没了，模型跟着走（A1）
+        // 关键：release() 会等监听循环收尾（最多 2 秒），绝不能让它跑在主线程上 ——
+        // onDestroy 是 stopService() 在主线程同步派发的，这里一卡就是 ANR。
+        // 另外服务退出的先后顺序也有讲究：先把 scope 取消掉，让 listen() 里的
+        // isActive 翻假、循环开始收尾，同时后台线程等它退干净再释放 native 句柄。
+        // 顺序反了（先 release 再 cancel）就等于让 native 对象在解码途中被 free，
+        // 直接 SIGSEGV —— 这正是「关监听闪退」的根因。
         scope.cancel()
         loopJob = null
+        releaseExecutor.execute {
+            runCatching { kwsEngine.release() }
+        }
+        // 释放任务排完队就关掉执行器：不接新活，已提交的那个照跑完。
+        // 服务会随开关反复创建销毁，不关就是每次漏一个线程。
+        releaseExecutor.shutdown()
         super.onDestroy()
     }
 

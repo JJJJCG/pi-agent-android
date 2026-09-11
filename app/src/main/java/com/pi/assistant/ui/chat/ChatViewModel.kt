@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /** 输入区下方那条状态带。 */
@@ -92,15 +93,22 @@ class ChatViewModel @Inject constructor(
             }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, WakeControl.State.OFF)
 
-    /** 顶栏开关点一下：交给 WakeControl，返回值非 null 时当 toast 弹出来。 */
+    /**
+     * 顶栏开关点一下：交给 WakeControl，返回值当 toast 弹出来。
+     *
+     * 走 IO 调度器而不是主线程 —— `set(false)` 会 stopService()，
+     * 那是一次带 Binder 往返的服务生命周期派发，别压在 UI 线程上。
+     */
     fun toggleWake(enable: Boolean, onResult: (String) -> Unit) {
-        val result = wakeControl.set(enable)
-        onResult(
-            when (result) {
-                is WakeControl.Result.Ok -> result.message
-                is WakeControl.Result.Failed -> result.message
-            }
-        )
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { wakeControl.set(enable) }
+            onResult(
+                when (result) {
+                    is WakeControl.Result.Ok -> result.message
+                    is WakeControl.Result.Failed -> result.message
+                }
+            )
+        }
     }
 
     /** 端侧 KWS 不可用的原因（缺 so / 模型），null 表示可用。 */
