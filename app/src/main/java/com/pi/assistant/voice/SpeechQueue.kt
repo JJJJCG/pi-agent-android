@@ -1,6 +1,5 @@
 package com.pi.assistant.voice
 
-import com.pi.assistant.audio.TtsSpeaker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
