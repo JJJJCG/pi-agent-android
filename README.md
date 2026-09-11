@@ -193,6 +193,22 @@ App → 设置：
 - [ ] 设置里关掉后麦克风立即释放（通知消失）
 - [ ] 耗电实测明显低于播放音乐类 App
 
+### M3 · 后台占用优化（见《后台占用优化-修改文档.md》）
+
+- [ ] **连续唤醒 10 轮，日志里 `KeywordSpotter` 只初始化 1 次**（A1。改之前是每轮一次）
+- [ ] 拔掉麦克风权限 / 被别的 App 占用时，日志退避依次是 3s → 6s → 12s → … → 60s，不再固定 3s（A2）
+- [ ] 关掉唤醒开关后：`dumpsys audio` 里不再有我们的 record client，常驻通知消失（回归这条，别改坏）
+- [ ] 条件设成「仅充电」+ 拔掉充电器 → 通知可划掉 / 消失，进程优先级降下去（`dumpsys activity processes` 里 oom_adj 变化）（A4）
+- [ ] 插上充电器 → 30s 内自动重新进前台、通知回来、能正常唤醒（A4）
+- [ ] `dumpsys meminfo com.pi.assistant`：唤醒关闭 + 进后台 30s 后，PSS 低于改动前（A6/A7）
+- [ ] 进后台 8s 再回前台，聊天列表和发消息都正常（A6 的 Room close）
+- [ ] `adb shell ls /data/data/com.pi.assistant/cache` 里没有 `utt_*` / `tts_*` 残留（A8）
+- [ ] provider 切到 nnapi 后仍能唤醒；机型不支持时日志能看到回退到 cpu（A5）
+- [ ] 息屏 8 小时稳定唤醒、误唤醒 < 1 次/小时（回归）
+
+> 耗电用 `adb shell dumpsys batterystats` 跑一晚，配 Battery Historian 看 KWS 期间的持续 CPU%，
+> 把「耗电实测明显低于播放音乐类 App」落成具体数字。
+
 ---
 
 ## 4. 代码地图
@@ -213,9 +229,11 @@ com.pi.assistant/
     ToneCue.kt               唤醒提示音
   data/
     pi/                      pi bridge 客户端 + 错误状态机（M1 的灵魂）
+    net/HttpClients.kt       唯一根 OkHttpClient，pi/语音都从它派生（共享连接池）
     speech/                  小米 MiMo 语音：识别 + 合成（同一个 chat/completions）
     prefs/SettingsStore.kt   全部配置（JSON 一条存进 Keystore 加密）
     local/                   Room 历史
+  system/IdleReaper.kt       进后台且空闲时释放 OkHttp/Room/缓存文件
   voice/
     VoiceBus.kt              服务 ↔ 界面的状态总线
     VoiceSession.kt          语音链路编排（M2/M3 的枢纽）
