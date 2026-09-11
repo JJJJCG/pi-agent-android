@@ -24,7 +24,7 @@ import javax.inject.Singleton
  * 选它的理由很实际：中文开箱即用、换唤醒词只改一个文本文件、零训练成本，
  * 而且跟 VAD 共用同一个 native 库，不多一份 so。
  *
- * 唤醒词固定为打包词表 assets/kws/keywords.txt 里的「水蓝蓝」
+ * 唤醒词固定为打包词表 assets/kws/keywords.txt 里的「喵喵」
  * （[PiSettings.WAKE_WORD] 只用于界面提示）。曾经的「设置里改词、运行时
  * 转拼音换按流词表」方案在实际设备上不生效，已整体移除 —— 要换词就改
  * keywords.txt 重新打包，词表格式见该文件头注释。
@@ -112,7 +112,7 @@ class KwsEngine @Inject constructor(
                         modelType = "zipformer2",
                     ),
                     maxActivePaths = 4,
-                    // 生效词表就是这份打包的 keywords.txt（唤醒词「水蓝蓝」）
+                    // 生效词表就是这份打包的 keywords.txt（唤醒词「喵喵」）
                     keywordsFile = paths.keywords,
                     keywordsScore = snapshot.kwsScore,
                     keywordsThreshold = snapshot.kwsThreshold,

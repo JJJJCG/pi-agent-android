@@ -2,9 +2,11 @@
 <resources>
     <string name="app_name">Pi 助手</string>
 
-    <!-- 长按桌面图标弹出的菜单 -->
-    <string name="shortcut_wake_short">后台监听</string>
-    <string name="shortcut_wake_long">打开 / 关闭后台监听</string>
+    <!-- 长按桌面图标弹出的菜单：开 / 关 两条，语义各管一边 -->
+    <string name="shortcut_wake_on_short">打开监听</string>
+    <string name="shortcut_wake_on_long">打开后台监听，麦克风常驻采集</string>
+    <string name="shortcut_wake_off_short">关闭监听</string>
+    <string name="shortcut_wake_off_long">关闭后台监听，释放麦克风</string>
 
     <!-- 下拉快捷设置里的磁贴 -->
     <string name="tile_wake_label">后台监听</string>

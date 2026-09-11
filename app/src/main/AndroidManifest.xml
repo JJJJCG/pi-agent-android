@@ -65,8 +65,8 @@
 
         <!--
           快捷方式的中转页：Android 的静态快捷方式只能指向 Activity，
-          所以「切换后台监听」这个动作由它代收，处理完立刻 finish，全程不可见
-          （主题是 Theme.PiAgent.Transparent）。
+          所以「开 / 关后台监听」这两个动作由它代收，处理完立刻 finish，
+          全程不可见（主题是 Theme.PiAgent.Transparent）。
           exported=true 是必须的 —— 快捷方式的 intent 由系统服务发出。
         -->
         <activity
@@ -76,8 +76,10 @@
             android:noHistory="true"
             android:taskAffinity=""
             android:theme="@style/Theme.PiAgent.Transparent">
+            <!-- 开 / 关各一条 action，由 shortcuts.xml 里对应的快捷方式发出 -->
             <intent-filter>
-                <action android:name="com.pi.assistant.action.TOGGLE_WAKE" />
+                <action android:name="com.pi.assistant.action.SET_WAKE_ON" />
+                <action android:name="com.pi.assistant.action.SET_WAKE_OFF" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>

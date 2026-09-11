@@ -12,19 +12,19 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
 /**
- * 静态快捷方式的中转页。
+ * 快捷方式的执行页（开 / 关后台监听）。
  *
- * Android 的静态快捷方式只能指向 Activity，不能直达 Service；而「切换后台监听」
- * 这个动作本质上是 Service 的活。所以这里当个一次性壳：拿到 intent 就干活，
- * 干完立即 finish()，界面上一闪而过。
+ * Android 的静态快捷方式只能指向 Activity，不能直达 Service；而「开关后台监听」
+ * 本质上是 Service 的活。所以这里当个一次性壳：拿到 intent 就干活，干完立即
+ * finish()，界面上一闪而过（主题是 Theme.PiAgent.Transparent）。
  *
- * 三种入口语义（由 intent 决定）：
- *   · 带 `EXTRA_DESIRED_STATE` → 明确要开或要关（磁贴、未来的通知按钮会用）
- *   · 不带 → 按当前状态取反（快捷方式用这条，一个入口管开管关）
+ * 方向怎么定 —— 三种入口，优先级从高到低：
+ *   1. action = SET_WAKE_ON / SET_WAKE_OFF ← 桌面快捷方式的正常路径
+ *   2. extra  EXTRA_DESIRED_STATE           ← 磁贴、外部自动化工具（am start）用
+ *   3. 都没有 → 按当前状态取反               ← 兜底，别让 intent 缺字段就白点
  *
- * 权限补救：开启监听需要录音权限，没有就不能硬开。这时不弹 toast 就算了，
- * 而是直接发起授权请求 —— 用户刚长按图标点过「打开监听」，此刻弹系统授权框
- * 心智上最顺，比让他自己去设置页翻权限友好得多。授权回来再补一次开启。
+ * 权限补救：开监听需要录音权限。没有时不弹 toast 就算了，而是直接发起授权请求
+ * —— 用户刚点过「打开监听」，此刻弹系统授权框心智上最顺。授权回来再补一次开启。
  */
 @AndroidEntryPoint
 class WakeToggleActivity : ComponentActivity() {
@@ -51,29 +51,34 @@ class WakeToggleActivity : ComponentActivity() {
         // 透明主题 + 不做任何 setContent：这个 Activity 只借个生命周期收发结果。
         // 不调 setContentView 是刻意的 —— 少了布局测量，闪一下就走。
 
-        val desired = readDesiredState(intent)
-        val needEnable = desired ?: !wakeControl.isOn
+        val enabled = resolveDesiredState(intent)
 
-        if (needEnable && !hasMicPermission()) {
+        if (enabled && !hasMicPermission()) {
             pendingEnabled = true
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
 
-        report(wakeControl.set(needEnable))
+        report(wakeControl.set(enabled))
         finish()
     }
 
     /**
-     * 从 intent 读「这次是要开还是要关」。没带就返回 null，交给调用方取反。
+     * 判断这次要开还是要关。
      *
-     * 特别注意 mutability 问题：快捷方式从图标长按菜单点进来的 intent，
-     * 可能被系统改写过；这里只读不写，不做任何假设。
+     * action 优先：快捷方式的 intent 是系统按 shortcuts.xml 拼的，只能带 action，
+     * 带不了 extras —— 所以「开 / 关」必须靠 action 区分，这是主路径。
      */
-    private fun readDesiredState(intent: Intent?): Boolean? {
-        if (intent == null) return null
-        if (!intent.hasExtra(EXTRA_DESIRED_STATE)) return null
-        return intent.getBooleanExtra(EXTRA_DESIRED_STATE, false)
+    private fun resolveDesiredState(intent: Intent?): Boolean {
+        when (intent?.action) {
+            ACTION_ON -> return true
+            ACTION_OFF -> return false
+        }
+        if (intent?.hasExtra(EXTRA_DESIRED_STATE) == true) {
+            return intent.getBooleanExtra(EXTRA_DESIRED_STATE, false)
+        }
+        // 兜底：啥都没说，当作切换
+        return !wakeControl.isOn
     }
 
     private fun hasMicPermission(): Boolean =
@@ -93,14 +98,20 @@ class WakeToggleActivity : ComponentActivity() {
 
     companion object {
         /**
-         * 明确指定要开还是要关。不传 = 切换。
+         * 明确指定要开还是要关。不传 action、也不传这个 extra 时按当前状态取反。
          *
-         * 从外部（比如自动化工具、通知按钮）拉起时用得上：
+         * 从外部（自动化工具、通知按钮）拉起时用得上：
          * ```
          * am start -n com.pi.assistant/.service.WakeToggleActivity \
          *   --ez desired_wake true
          * ```
          */
         const val EXTRA_DESIRED_STATE = "desired_wake"
+
+        /** 桌面快捷方式「打开监听」发出的 action。 */
+        const val ACTION_ON = "com.pi.assistant.action.SET_WAKE_ON"
+
+        /** 桌面快捷方式「关闭监听」发出的 action。 */
+        const val ACTION_OFF = "com.pi.assistant.action.SET_WAKE_OFF"
     }
 }

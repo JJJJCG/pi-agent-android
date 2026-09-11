@@ -117,8 +117,8 @@ data class PiSettings(
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
     companion object {
-        /** 唤醒词固定为打包词表里的「水蓝蓝」，界面只做提示，不可改。 */
-        const val WAKE_WORD = "水蓝蓝"
+        /** 唤醒词固定为打包词表里的「喵喵」，界面只做提示，不可改。 */
+        const val WAKE_WORD = "喵喵"
 
         const val DEFAULT_BASE_URL = "http://192.168.31.145:9901"
         const val DEFAULT_TIMEOUT_SEC = 120

@@ -311,13 +311,13 @@ def write_keywords(workdir: Path, keywords: str | None) -> None:
         if have.exists():
             print("  已保留现有的 keywords.txt（没传 --keywords，不覆盖）：")
             print("    " + have.read_text(encoding="utf-8").strip().replace("\n", "\n    "))
-            print("  要换成别的词：--keywords 水蓝蓝")
+            print("  要换成别的词：--keywords 喵喵")
         else:
             print("  提示：当前唤醒词是模型自带的演示词（你好军哥 / 小爱同学 之类）。")
-            print("        换成自己的：--keywords 水蓝蓝")
+            print("        换成自己的：--keywords 喵喵")
         print()
         print("  也可以直接手改 assets/kws/keywords.txt —— 格式是 ppinyin：")
-        print("    一个汉字 = 声母 + 韵母（韵母带声调），例：水蓝蓝 → sh uǐ l án l án @水蓝蓝")
+        print("    一个汉字 = 声母 + 韵母（韵母带声调），例：喵喵 → m iāo m iāo @喵喵")
         print("    可用音素在 assets/kws/tokens.txt 里，照着已有行拼即可。")
         return
 
@@ -404,7 +404,7 @@ def main() -> int:
     parser.add_argument("--version", default=None,
                         help="指定 sherpa-onnx 版本 tag（默认取最新 release）")
     parser.add_argument("--keywords", default=None,
-                        help="唤醒词，如 水蓝蓝；需要本机有 sherpa-onnx-cli")
+                        help="唤醒词，如 喵喵；需要本机有 sherpa-onnx-cli")
     parser.add_argument("--check", action="store_true", help="只报告现状，不下载")
     args = parser.parse_args()
 

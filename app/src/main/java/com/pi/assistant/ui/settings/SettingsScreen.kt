@@ -428,7 +428,7 @@ fun SettingsScreen(
             // 除了这个开关，还有两个更快的入口 —— 都不需要打开 App
             Text(
                 text = "不想每次开 App 的话，还有两条近路：\n" +
-                    "· 长按桌面上「Pi 助手」的图标 → 菜单里点「后台监听」\n" +
+                    "· 长按桌面上「Pi 助手」的图标 → 菜单里点「打开监听」或「关闭监听」\n" +
                     "· 下拉通知栏 → 编辑快捷设置 → 把「后台监听」磁贴拖进去",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
