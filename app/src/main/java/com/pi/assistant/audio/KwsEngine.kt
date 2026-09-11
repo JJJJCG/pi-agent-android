@@ -187,14 +187,21 @@ class KwsEngine @Inject constructor(
         // 打上标记后，release() 就会一直等到这里收尾干净才动手释放 native 句柄。
         synchronized(loopLock) { loopRunning = true }
 
+        // 循环要能感知协程被取消。原来 `isActive` 直接可用，是因为这段代码长在
+        // withContext 的 lambda 里、接收者就是它的 CoroutineScope；抽成独立函数
+        // 后那个接收者没了。这里在还有接收者的地方把它接出来，以 lambda 传入。
+        val scope = this
+        val stillActive = { scope.isActive }
+
         try {
-            listenLoop(shouldContinue, onKeyword, onError)
+            listenLoop(stillActive, shouldContinue, onKeyword, onError)
         } finally {
             signalLoopExit()
         }
     }
 
     private suspend fun listenLoop(
+        stillActive: () -> Boolean,
         shouldContinue: () -> Boolean,
         onKeyword: (String) -> Unit,
         onError: (String) -> Unit,
@@ -217,7 +224,7 @@ class KwsEngine @Inject constructor(
         val floats = FloatArray(AudioRecorder.CHUNK)
 
         try {
-            while (shouldContinue() && isActive) {
+            while (shouldContinue() && stillActive()) {
                 val read = recorder.read(buffer)
                 if (read <= 0) continue
 

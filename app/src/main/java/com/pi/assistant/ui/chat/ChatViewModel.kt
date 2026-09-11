@@ -15,6 +15,7 @@ import com.pi.assistant.voice.VoiceBus
 import com.pi.assistant.voice.VoiceSession
 import com.pi.assistant.voice.VoiceStage
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
