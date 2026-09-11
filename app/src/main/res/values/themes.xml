@@ -5,4 +5,21 @@
         <item name="android:windowBackground">@color/white</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
     </style>
+
+    <!--
+      快捷方式中转页专用：完全透明、无动画、无标题栏。
+
+      这个 Activity 只借个生命周期处理「开关监听」再立刻 finish()，
+      用户不应该看到任何界面。三个「看不见」的要点：
+        · windowIsTranslucent：不透明窗口在启动的一瞬间会闪一下白屏
+        · windowNoDisplay：从系统角度看它压根不显示（比纯透明更彻底）
+        · windowAnimationStyle=@null：去掉系统的 Activity 转场缩放动画
+    -->
+    <style name="Theme.PiAgent.Transparent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoDisplay">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

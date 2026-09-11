@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  静态快捷方式：长按桌面上的 App 图标即可「打开/关闭后台监听」。
+
+  为什么走 Activity 而不是直接 startService：
+  静态快捷方式只能指向 Activity，系统不允许快捷方式直达 Service。所以统一
+  交给 .service.WakeToggleActivity 处理（见那边注释）。
+
+  为什么只放一个：
+  切换方向取决于当前状态，不能在 XML 里写死「打开」或「关闭」。用同一个目标
+  配两个 shortcutId，Activity 按 id 决定这次是开、是关、还是纯切换。
+  长按菜单里只留一项，避免把菜单撑得又长又绕。
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_wake_on"
+        android:shortcutId="wake_toggle"
+        android:shortcutShortLabel="@string/shortcut_wake_short"
+        android:shortcutLongLabel="@string/shortcut_wake_long">
+        <intent
+            android:action="com.pi.assistant.action.TOGGLE_WAKE"
+            android:targetClass="com.pi.assistant.service.WakeToggleActivity"
+            android:targetPackage="com.pi.assistant" />
+    </shortcut>
+
+</shortcuts>

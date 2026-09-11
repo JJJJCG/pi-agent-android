@@ -56,17 +56,56 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- 长按桌面图标弹出的静态快捷方式（见 res/xml/shortcuts.xml） -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!--
+          快捷方式的中转页：Android 的静态快捷方式只能指向 Activity，
+          所以「切换后台监听」这个动作由它代收，处理完立刻 finish，全程不可见
+          （主题是 Theme.PiAgent.Transparent）。
+          exported=true 是必须的 —— 快捷方式的 intent 由系统服务发出。
+        -->
+        <activity
+            android:name=".service.WakeToggleActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.PiAgent.Transparent">
+            <intent-filter>
+                <action android:name="com.pi.assistant.action.TOGGLE_WAKE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <!--
           常驻唤醒服务。foregroundServiceType 必须是 microphone，
           且运行时还要有 FOREGROUND_SERVICE_MICROPHONE 权限。
-          只由用户在设置页手动开启，不做自启动。
+          只由用户在设置页 / 快捷方式 / 磁贴手动开启，不做自启动。
         -->
         <service
             android:name=".service.WakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!--
+          下拉快捷设置里的「后台监听」磁贴。
+          BIND_QUICK_SETTINGS_TILE 权限由系统持有，所以 exported 必须为 true。
+        -->
+        <service
+            android:name=".service.WakeTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_wake"
+            android:label="@string/tile_wake_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
     </application>
 

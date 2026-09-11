@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 快捷方式 / 磁贴图标：带斜杠的麦克风（表示「停止监听」）。
+     和 ic_wake_on 的区别只在那道斜杠，尺寸、配色保持一致。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF9AA0A6"
+        android:pathData="M12,14c1.66,0 3,-1.34 3,-3V5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6C9,12.66 10.34,14 12,14z" />
+    <path
+        android:fillColor="#FF9AA0A6"
+        android:pathData="M17,11c0,2.76 -2.24,5 -5,5s-5,-2.24 -5,-5H5c0,3.53 2.61,6.43 6,6.92V21h2v-3.08c3.39,-0.49 6,-3.39 6,-6.92H17z" />
+    <path
+        android:fillColor="#FF9AA0A6"
+        android:pathData="M3.71,3.71L2.3,5.12l3.4,3.4L5,11c0,3.53 2.61,6.43 6,6.92V21h2v-3.08c0.94,-0.14 1.83,-0.43 2.63,-0.85l2.25,2.25 1.41,-1.41L3.71,3.71z" />
+    <path
+        android:fillColor="#FF9AA0A6"
+        android:pathData="M16.9,13.4c0.07,-0.23 0.1,-0.47 0.1,-0.72V11h-2v1.68l1.9,1.9z" />
+</vector>

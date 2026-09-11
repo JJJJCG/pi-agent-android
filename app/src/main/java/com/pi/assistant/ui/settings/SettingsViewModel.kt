@@ -23,7 +23,7 @@ import com.pi.assistant.data.pi.PiRepository
 import com.pi.assistant.data.pi.ProbeResult
 import com.pi.assistant.data.speech.SpeechRepository
 import com.pi.assistant.data.speech.SpeechResult
-import com.pi.assistant.service.WakeWordService
+import com.pi.assistant.service.WakeControl
 import com.pi.assistant.voice.TtsSpeaker
 import com.pi.assistant.voice.VoiceBus
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -129,6 +129,7 @@ class SettingsViewModel @Inject constructor(
     private val vadRecorder: VadRecorder,
     private val kwsEngine: KwsEngine,
     private val bus: VoiceBus,
+    private val wakeControl: WakeControl,
 ) : ViewModel() {
 
     private val _draft = MutableStateFlow(settings.current.toDraft())
@@ -380,33 +381,19 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    /** 开关唤醒服务。这是唯一合规的启动来源 —— 不做自启动。 */
+    /**
+     * 开关后台监听。
+     *
+     * 真正的启停逻辑在 [WakeControl] —— 设置页、桌面快捷方式、快捷设置磁贴
+     * 三处共用同一份，避免哪天只有一处补了校验。这里只负责：先把设置页
+     * 草稿落盘（用户可能刚改完 KWS 阈值），再把结果转成 toast。
+     */
     fun setWakeEnabled(enabled: Boolean) {
-        if (enabled) {
-            kwsEngine.unavailableReason()?.let {
-                _toast.value = "唤醒不可用：$it"
-                return
-            }
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
-                _toast.value = "请先授予录音权限"
-                return
-            }
-            saveAll(showToast = false)
-            settings.updateWakeEnabled(true)
-            WakeWordService.start(context)
-            val wakeSaved = settings.current
-            _toast.value =
-                if (wakeSaved.wakeOnlyWifi && wakeSaved.wakeWifiSsid.isNotBlank() && !hasWifiNamePermission) {
-                    "已开启唤醒，但读不到 Wi-Fi 名（缺权限），指定 Wi-Fi 条件不会满足"
-                } else {
-                    "已开启唤醒，麦克风将常驻采集"
-                }
-        } else {
-            settings.updateWakeEnabled(false)
-            WakeWordService.stop(context)
-            _toast.value = "已关闭唤醒"
+        // 开启前先落盘，服务起来就会读到刚改的阈值和生效条件
+        if (enabled) saveAll(showToast = false)
+        _toast.value = when (val result = wakeControl.set(enabled, skippedConfigSave = enabled)) {
+            is WakeControl.Result.Ok -> result.message
+            is WakeControl.Result.Failed -> result.message
         }
     }
 
