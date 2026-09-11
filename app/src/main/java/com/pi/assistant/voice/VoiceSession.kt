@@ -3,7 +3,6 @@ package com.pi.assistant.voice
 import android.content.Context
 import com.pi.assistant.audio.AudioFocusHelper
 import com.pi.assistant.audio.ToneCue
-import com.pi.assistant.audio.TtsPlayer
 import com.pi.assistant.audio.VadRecorder
 import com.pi.assistant.data.local.MessageDao
 import com.pi.assistant.data.local.MessageEntity
@@ -40,7 +39,7 @@ class VoiceSession @Inject constructor(
     private val speech: SpeechRepository,
     private val pi: PiRepository,
     private val dao: MessageDao,
-    private val ttsPlayer: TtsPlayer,
+    private val speaker: TtsSpeaker,
     private val bus: VoiceBus,
 ) {
 
@@ -50,7 +49,7 @@ class VoiceSession @Inject constructor(
 
     /** 录音期间失去音频焦点 → 停播放，把声道让出去。 */
     init {
-        focus.onFocusLost = { ttsPlayer.stop() }
+        focus.onFocusLost = { speaker.stop() }
     }
 
     val isBusy: Boolean get() = busy.get()
@@ -78,6 +77,8 @@ class VoiceSession @Inject constructor(
             }
 
             bus.setStage(VoiceStage.TRANSCRIBING)
+            // record() 返回时麦克风已经关了，这时候响不会被自己录进去
+            ToneCue.ack()
             return when (val result = speech.transcribe(wav)) {
                 is SpeechResult.Ok -> {
                     bus.setHeadline(result.value)
@@ -114,8 +115,9 @@ class VoiceSession @Inject constructor(
         }
     }
 
+    /** 打断当前朗读。流式和整段两条路都要停 —— 停错一条等于没停。 */
     fun stopSpeaking() {
-        ttsPlayer.stop()
+        speaker.stop()
     }
 
     // --------------------------------------------------------- 唤醒后一轮
@@ -144,6 +146,8 @@ class VoiceSession @Inject constructor(
             }
 
             bus.setStage(VoiceStage.TRANSCRIBING)
+            // 说完的反馈音：和开头那声 ding() 配成一对（一声到你了 / 两声听完了）
+            ToneCue.ack()
             val text = when (val result = speech.transcribe(wav)) {
                 is SpeechResult.Ok -> result.value
                 is SpeechResult.Failed -> {
@@ -217,18 +221,8 @@ class VoiceSession @Inject constructor(
     private suspend fun speakInternal(text: String) {
         if (MarkdownStripper.strip(text).isBlank()) return
         bus.setStage(VoiceStage.SPEAKING)
-
-        when (val audio = speech.synthesize(text)) {
-            is SpeechResult.Ok -> {
-                val file = audio.value
-                try {
-                    ttsPlayer.play(file)
-                } finally {
-                    file.delete()
-                }
-            }
-            is SpeechResult.Failed -> bus.setError(audio.message)
-        }
+        // 流式 / 整段的选路与兜底都在 TtsSpeaker 里，这里只负责把错误摆到界面上
+        speaker.speak(text)?.let { bus.setError(it) }
     }
 
     private companion object {

@@ -1,9 +1,11 @@
 package com.pi.assistant.data.speech
 
 import kotlinx.serialization.Serializable
+import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.POST
+import retrofit2.http.Streaming
 
 /**
  * 小米 MiMo 的语音接口。
@@ -24,6 +26,16 @@ interface MimoSpeechApi {
     /** 语音合成：待合成文本放 assistant 消息，音频 base64 在响应的 message.audio.data。 */
     @POST("chat/completions")
     suspend fun synthesize(@Body body: MimoTtsRequest): Response<MimoTtsResponse>
+
+    /**
+     * 流式合成：响应是 SSE，音频一小块一小块地吐（`delta.audio.data`，base64）。
+     *
+     * **`@Streaming` 是必须的。** 不带它的话 Retrofit 会先把整个响应体读进内存
+     * 再交给调用方 —— 那样既拿不到「边到边播」，长音频还可能直接 OOM。
+     */
+    @Streaming
+    @POST("chat/completions")
+    suspend fun synthesizeStream(@Body body: MimoTtsRequest): Response<ResponseBody>
 }
 
 // ------------------------------------------------------------------- 语音识别
@@ -93,6 +105,11 @@ data class MimoTtsRequest(
     val model: String,
     val messages: List<MimoChatMessage>,
     val audio: MimoAudioSpec,
+    /**
+     * 流式开关。null = 不带这个字段（服务端按非流式处理）。
+     * 序列化器配了 `explicitNulls = false`，所以 null 不会写进请求体。
+     */
+    val stream: Boolean? = null,
 )
 
 @Serializable
@@ -103,7 +120,10 @@ data class MimoChatMessage(
 
 @Serializable
 data class MimoAudioSpec(
-    /** 非流式用 wav / mp3；流式才要求 pcm16，我们不走流式。 */
+    /**
+     * 非流式：`wav` / `mp3`（拿到的是完整容器，直接落盘即可）。
+     * 流式：必须是 `pcm16`（或 `pcm`，等价），否则分块拼起来是坏的。
+     */
     val format: String,
     /** 预置音色 ID，如 `mimo_default`、`冰糖`；留空则用服务端默认。 */
     val voice: String? = null,

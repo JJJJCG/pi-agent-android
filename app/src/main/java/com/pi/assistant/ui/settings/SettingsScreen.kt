@@ -317,9 +317,21 @@ fun SettingsScreen(
                     onValueChange = viewModel::updateTtsFormat,
                     label = "音频格式",
                     placeholder = "wav",
+                    hint = "仅非流式生效",
                     modifier = Modifier.weight(1f),
                 )
             }
+
+            SwitchRow(
+                label = "流式播放（边合成边播）",
+                hint = if (draft.ttsStream) {
+                    "听到第一声不用等整段合完；格式固定 pcm16，上面的「音频格式」不生效"
+                } else {
+                    "整段合完再播：首字延迟高，但端点不认 stream 参数时可退回这条老路"
+                },
+                checked = draft.ttsStream,
+                onToggle = { viewModel.toggleTtsStream() },
+            )
 
             OutlinedButton(
                 onClick = viewModel::testSpeak,

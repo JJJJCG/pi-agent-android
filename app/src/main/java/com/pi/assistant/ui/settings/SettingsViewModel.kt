@@ -12,7 +12,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pi.assistant.audio.KwsEngine
-import com.pi.assistant.audio.TtsPlayer
+import com.pi.assistant.audio.ToneCue
 import com.pi.assistant.audio.VadRecorder
 import com.pi.assistant.data.local.MessageDao
 import com.pi.assistant.data.prefs.MimoSpeech
@@ -24,6 +24,7 @@ import com.pi.assistant.data.pi.ProbeResult
 import com.pi.assistant.data.speech.SpeechRepository
 import com.pi.assistant.data.speech.SpeechResult
 import com.pi.assistant.service.WakeWordService
+import com.pi.assistant.voice.TtsSpeaker
 import com.pi.assistant.voice.VoiceBus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -71,6 +72,7 @@ data class SettingsDraft(
     val ttsStylePrompt: String = "",
     val ttsSpeed: String = "1.0",
     val ttsFormat: String = "wav",
+    val ttsStream: Boolean = true,
     val autoSpeak: Boolean = false,
 
     // VAD
@@ -123,7 +125,7 @@ class SettingsViewModel @Inject constructor(
     private val repository: PiRepository,
     private val dao: MessageDao,
     private val speech: SpeechRepository,
-    private val ttsPlayer: TtsPlayer,
+    private val speaker: TtsSpeaker,
     private val vadRecorder: VadRecorder,
     private val kwsEngine: KwsEngine,
     private val bus: VoiceBus,
@@ -206,6 +208,7 @@ class SettingsViewModel @Inject constructor(
     fun updateTtsVoice(value: String) = mutate { it.copy(ttsVoice = value) }
     fun updateTtsStylePrompt(value: String) = mutate { it.copy(ttsStylePrompt = value) }
     fun updateTtsFormat(value: String) = mutate { it.copy(ttsFormat = value) }
+    fun toggleTtsStream() = mutate { it.copy(ttsStream = !it.ttsStream) }
     fun updateTtsSpeed(value: String) = mutate { it.copy(ttsSpeed = value) }
     fun toggleAutoSpeak() = mutate { it.copy(autoSpeak = !it.autoSpeak) }
 
@@ -258,6 +261,7 @@ class SettingsViewModel @Inject constructor(
                     ttsStylePrompt = draft.ttsStylePrompt.trim(),
                     ttsSpeed = draft.ttsSpeed.toFloatOrNull()?.coerceIn(0.25f, 4.0f) ?: 1.0f,
                     ttsFormat = draft.ttsFormat.trim().ifBlank { "wav" },
+                    ttsStream = draft.ttsStream,
                     autoSpeak = draft.autoSpeak,
                 ),
 
@@ -320,22 +324,17 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    /** 想验证语音端点，合成一句真话听听比看文档靠谱。 */
+    /**
+     * 想验证语音端点，合成一句真话听听比看文档靠谱。
+     *
+     * 走的是 [TtsSpeaker] —— 也就是日常朗读那条路（含流式开关和兜底），
+     * 这样「试听能出声」才能推出「朗读也能出声」，而不是验了个另一条链路。
+     */
     fun testSpeak() {
         saveAll(showToast = false)
         mutate { it.copy(testingSpeech = true) }
         viewModelScope.launch {
-            when (val result = speech.synthesize(TEST_SENTENCE)) {
-                is SpeechResult.Ok -> {
-                    val file = result.value
-                    try {
-                        ttsPlayer.play(file)
-                    } finally {
-                        file.delete()
-                    }
-                }
-                is SpeechResult.Failed -> _toast.value = result.message
-            }
+            speaker.speak(TEST_SENTENCE)?.let { _toast.value = it }
             mutate { it.copy(testingSpeech = false) }
         }
     }
@@ -367,6 +366,8 @@ class SettingsViewModel @Inject constructor(
                 mutate { it.copy(testingAsr = false) }
                 return@launch
             }
+            // 和正式流程同一声反馈：试识别要试的本来就不只是识别本身
+            ToneCue.ack()
             try {
                 when (val result = speech.transcribe(wav)) {
                     is SpeechResult.Ok -> _toast.value = "识别到：「${result.value}」"
@@ -464,6 +465,7 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     ttsStylePrompt = speech.ttsStylePrompt,
     ttsSpeed = speech.ttsSpeed.toString(),
     ttsFormat = speech.ttsFormat,
+    ttsStream = speech.ttsStream,
     autoSpeak = speech.autoSpeak,
     vadThreshold = vadThreshold.toString(),
     vadMinSilenceMs = vadMinSilenceMs.toString(),

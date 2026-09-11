@@ -60,6 +60,33 @@ class HttpClients @Inject constructor(
         }
         .build()
 
+    /**
+     * MiMo 语音 · 流式合成。
+     *
+     * 和 [forSpeech] 只差一处，但很关键：**不设 callTimeout**。
+     * 流式是「边生成边收」，一段四千字的文本读下来可能好几分钟 —— 任何固定的总超时
+     * 都会在播放中途把连接掐掉，而那时用户正听着。
+     * 卡死交给 readTimeout 兜底：正常流式每几百毫秒就有一块音频，30 秒没动静
+     * 是明确异常，报错比让用户盯着「正在朗读」强。
+     *
+     * 关掉隐式重试：流已经消费了一半再重试，只会把前半句念两遍。
+     *
+     * 日志拦截器（根 client 上的 BASIC）在这里是安全的 —— 它只记请求行和响应状态，
+     * 不碰响应体。换成 BODY 会把整段音频先读进内存，流式就废了，别改。
+     */
+    fun forSpeechStream(token: String): OkHttpClient = root.newBuilder()
+        .callTimeout(0, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(false)
+        .addInterceptor { chain ->
+            val b = chain.request().newBuilder()
+            if (token.isNotBlank()) {
+                b.addHeader("Authorization", "Bearer $token").addHeader("api-key", token)
+            }
+            chain.proceed(b.build())
+        }
+        .build()
+
     /** 进后台收工用：掐掉在途请求 + 关掉空闲连接（IdleReaper 调用）。 */
     fun release() {
         root.dispatcher.cancelAll()

@@ -46,8 +46,20 @@ data class MimoSpeech(
     /** 自然语言风格指令，会作为 user 消息发出去（合成文本放 assistant）。 */
     val ttsStylePrompt: String = "",
     val ttsSpeed: Float = 1.0f,
-    /** MiMo 非流式用 wav —— 拿到的就是完整容器，不用再解码。 */
+    /**
+     * 非流式（整段合成）用的容器格式：wav / mp3。
+     *
+     * **流式下不生效** —— MiMo 的流式只认 pcm16，否则分块拼起来是坏的，
+     * 所以走流式时这个值会被忽略（见 SpeechRepository.buildTtsRequest）。
+     */
     val ttsFormat: String = "wav",
+    /**
+     * 流式朗读：边合成边播。
+     *
+     * 首字延迟从「整段合完」降到「第一块音频到」，代价是播放期间不能落盘成 wav
+     * （裸 PCM 本来也没法存成通用音频文件）。端点不认 `stream` 参数时关掉它能退回老路。
+     */
+    val ttsStream: Boolean = true,
     val autoSpeak: Boolean = false,
 ) {
     val asrConfigured: Boolean
