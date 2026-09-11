@@ -59,6 +59,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pi.assistant.data.prefs.PiSettings
 import com.pi.assistant.data.prefs.MimoSpeech
 import com.pi.assistant.data.prefs.ThemeMode
+import com.pi.assistant.service.WakeControl
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -410,12 +411,12 @@ fun SettingsScreen(
             SwitchRow(
                 label = "常驻聆听唤醒词",
                 hint = when (wakeState) {
-                    WakeState.OFF -> "当前：已关闭"
-                    WakeState.RUNNING -> "当前：服务运行中"
-                    WakeState.NOT_RUNNING -> "当前：配置是开的，但服务没在跑"
+                    WakeControl.State.OFF -> "当前：已关闭"
+                    WakeControl.State.RUNNING -> "当前：服务运行中"
+                    WakeControl.State.NOT_RUNNING -> "当前：配置是开的，但服务没在跑"
                 },
                 // 开关反映「配置意图」；服务实际有没有跑，看下面的状态提示
-                checked = wakeState != WakeState.OFF,
+                checked = wakeState != WakeControl.State.OFF,
                 onToggle = { next ->
                     if (next) {
                         micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -434,7 +435,7 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            if (wakeState == WakeState.NOT_RUNNING) {
+            if (wakeState == WakeControl.State.NOT_RUNNING) {
                 NoticeCard(
                     text = "唤醒服务现在没在运行 —— 多半被系统的省电策略杀掉了。" +
                         "刚打开开关的几秒内显示这句是正常的；如果一直这样，点下面重新拉起。",

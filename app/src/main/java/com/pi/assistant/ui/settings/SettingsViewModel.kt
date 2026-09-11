@@ -38,18 +38,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/** 唤醒开关的三种真实状态。 */
-enum class WakeState {
-    /** 配置就是关的。 */
-    OFF,
-
-    /** 配置开着，服务也确实在跑。 */
-    RUNNING,
-
-    /** 配置开着，但服务没在跑 —— 多半被系统杀了，需要用户手动拉起来。 */
-    NOT_RUNNING,
-}
-
 /**
  * 设置页的编辑态。
  *
@@ -147,18 +135,16 @@ class SettingsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, settings.current.wakeEnabled)
 
     /**
-     * 配置说的和实际在跑的，可能不是一回事。
-     *
-     * 典型场景：昨天开了唤醒，系统今天把进程杀了 —— 配置里还是 `true`，
-     * 但没人在听。界面必须说实话，否则用户以为开着，喊半天没反应。
+     * 配置说的和实际在跑的，可能不是一回事。三态定义见 [WakeControl.State]。
      */
-    val wakeState: StateFlow<WakeState> = combine(settings.state, bus.serviceRunning) { snapshot, running ->
-        when {
-            !snapshot.wakeEnabled -> WakeState.OFF
-            running -> WakeState.RUNNING
-            else -> WakeState.NOT_RUNNING
-        }
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, WakeState.OFF)
+    val wakeState: StateFlow<WakeControl.State> =
+        combine(settings.state, bus.serviceRunning) { snapshot, running ->
+            when {
+                !snapshot.wakeEnabled -> WakeControl.State.OFF
+                running -> WakeControl.State.RUNNING
+                else -> WakeControl.State.NOT_RUNNING
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, WakeControl.State.OFF)
 
     val encryptedBacked: Boolean get() = settings.encryptedBacked
 

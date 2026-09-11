@@ -36,7 +36,33 @@ class WakeControl @Inject constructor(
         data class Failed(val message: String) : Result
     }
 
+    /**
+     * 开关的三种真实状态。
+     *
+     * 「配置说的」和「实际在跑的」可能不是一回事：昨天开了监听，系统今天把
+     * 进程杀了 —— 配置里还是 true，但没人在听。设置页和主界面顶栏都要按
+     * 这个三态说实话，否则用户以为开着，喊半天没反应。
+     */
+    enum class State {
+        /** 配置就是关的。 */
+        OFF,
+
+        /** 配置开着，服务也确实在跑。 */
+        RUNNING,
+
+        /** 配置开着，但服务没在跑 —— 多半被系统杀了，需要用户手动拉起来。 */
+        NOT_RUNNING,
+    }
+
     val isOn: Boolean get() = settings.current.wakeEnabled
+
+    /**
+     * 端侧 KWS 不可用的原因（缺 so / 缺模型），null 表示可用。
+     *
+     * 暴露给界面做提前提示：不可用时开关该变灰并说明原因，
+     * 而不是等用户点了才弹一句「唤醒不可用」。
+     */
+    val unavailableReason: String? get() = kwsEngine.unavailableReason()
 
     /**
      * 切换。`on` 为 null 时按当前配置取反 —— 快捷方式和磁贴不需要先看状态，

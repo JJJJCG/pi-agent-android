@@ -10,6 +10,7 @@ import com.pi.assistant.data.pi.PiRepository
 import com.pi.assistant.data.pi.PiResult
 import com.pi.assistant.data.pi.PiStatus
 import com.pi.assistant.data.prefs.SettingsStore
+import com.pi.assistant.service.WakeControl
 import com.pi.assistant.voice.VoiceBus
 import com.pi.assistant.voice.VoiceSession
 import com.pi.assistant.voice.VoiceStage
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -46,6 +48,7 @@ class ChatViewModel @Inject constructor(
     private val settings: SettingsStore,
     private val voiceSession: VoiceSession,
     private val bus: VoiceBus,
+    private val wakeControl: WakeControl,
 ) : ViewModel() {
 
     val messages: StateFlow<List<MessageEntity>> = dao.observeAll()
@@ -71,6 +74,37 @@ class ChatViewModel @Inject constructor(
 
     /** 非 null 表示这台设备跑不了端侧 VAD（缺 so 或模型），界面据此禁用麦克风。 */
     val micUnavailableReason: String? get() = voiceSession.micUnavailableReason
+
+    // ---- 后台监听（M3）：主界面顶栏那个开关
+
+    /**
+     * 顶栏开关显示什么。
+     *
+     * 和设置页同一套判断：配置开着 + 服务在跑才算真在监听。被系统杀掉时
+     * 配置仍是 true，但没人在听 —— 顶栏得说实话，否则用户喊半天没反应。
+     */
+    val wakeState: StateFlow<WakeControl.State> =
+        combine(settings.state, bus.serviceRunning) { snapshot, running ->
+            when {
+                !snapshot.wakeEnabled -> WakeControl.State.OFF
+                running -> WakeControl.State.RUNNING
+                else -> WakeControl.State.NOT_RUNNING
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, WakeControl.State.OFF)
+
+    /** 顶栏开关点一下：交给 WakeControl，返回值非 null 时当 toast 弹出来。 */
+    fun toggleWake(enable: Boolean, onResult: (String) -> Unit) {
+        val result = wakeControl.set(enable)
+        onResult(
+            when (result) {
+                is WakeControl.Result.Ok -> result.message
+                is WakeControl.Result.Failed -> result.message
+            }
+        )
+    }
+
+    /** 端侧 KWS 不可用的原因（缺 so / 模型），null 表示可用。 */
+    val wakeUnavailableReason: String? get() = wakeControl.unavailableReason
 
     init {
         refreshStatus()
