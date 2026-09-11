@@ -11,6 +11,8 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
@@ -47,7 +49,7 @@ import javax.inject.Inject
  *   · 只由用户手动开（Android 12+ 也不允许后台自启，别试）
  *   · 常驻通知里必须能一键停
  *   · 首开时明确告知麦克风将常驻采集（在设置页做）
- *   · 默认受条件限制（充电 / 家里 Wi-Fi / 时间段）可以按需收紧
+ *   · 默认受条件限制（充电 / 指定 Wi-Fi / 时间段）可以按需收紧
  *
  * 时序上最关键的一点：KWS 监听循环和「一轮对话」是**串行**的。
  * 命中唤醒词后先让 listen() 返回（麦克风随之释放），再去录音，
@@ -244,7 +246,8 @@ class WakeWordService : Service() {
      * 这个判断在 `shouldContinue` 里**每帧**都会被问到（512 样本 ≈ 32ms，
      * 约 31 次/秒）。而底层那几个检查并不便宜：
      *   · isCharging() 是一次 registerReceiver 的 Binder IPC
-     *   · isOnWifi() 是 ConnectivityManager 的两次 Binder IPC
+     *   · isOnWifi() 是 ConnectivityManager 的两次 Binder IPC，
+     *     指定了 SSID 时还多一两次读 Wi-Fi 名的 IPC
      *   · isWithinTimeWindow() 每次 new 一个 Calendar
      * 合起来每秒近百次跨进程调用，而这些状态几秒内根本不会变 —— 纯烧电。
      *
@@ -273,7 +276,7 @@ class WakeWordService : Service() {
     private fun conditionHint(): String = when {
         !settings.current.wakeEnabled -> "唤醒已关闭"
         settings.current.wakeOnlyCharging && !isCharging() -> "仅充电时监听，当前未充电"
-        settings.current.wakeOnlyWifi && !isOnWifi() -> "仅家里 Wi-Fi 下监听，当前不在"
+        settings.current.wakeOnlyWifi && !isOnWifi() -> wifiHint()
         else -> "不在设定的监听时段内"
     }
 
@@ -284,12 +287,60 @@ class WakeWordService : Service() {
             status == BatteryManager.BATTERY_STATUS_FULL
     }.getOrDefault(false)
 
-    private fun isOnWifi(): Boolean = runCatching {
+    /**
+     * 是否满足 Wi-Fi 条件：在 Wi-Fi 上，且（若配置了指定 SSID）名字对得上。
+     *
+     * SSID 留空 = 任意 Wi-Fi，行为与老版本一致。
+     * 指定了 SSID 但读不到名字（缺权限 / 系统定位开关关着）时按「不满足」处理 ——
+     * 宁可不监听，也不能误监听。具体原因由 [wifiHint] 说给用户听。
+     */
+    private fun isOnWifi(): Boolean {
+        if (!onWifiTransport()) return false
+        val target = settings.current.wakeWifiSsid.trim().removeSurrounding("\"")
+        if (target.isEmpty()) return true
+        val ssid = currentWifiSsid() ?: return false
+        return ssid.equals(target, ignoreCase = true)
+    }
+
+    private fun onWifiTransport(): Boolean = runCatching {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return@runCatching false
         val network = cm.activeNetwork ?: return@runCatching false
         val caps = cm.getNetworkCapabilities(network) ?: return@runCatching false
         caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }.getOrDefault(false)
+
+    /**
+     * 当前 Wi-Fi 名（已去引号）。不在 Wi-Fi 上、或系统不肯报名字时返回 null。
+     *
+     * 系统限制：Android 8.1 起读 SSID 要定位权限（13 起换成「附近设备」权限也行，
+     * 见 Manifest 的双轨声明），12 及以下还要求系统定位开关开着；不满足时 API 只会
+     * 吐 `<unknown ssid>`，这里统一按 null 处理。
+     */
+    private fun currentWifiSsid(): String? = runCatching {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val caps = cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            return@runCatching null
+        }
+        // 31+ 优先走 capabilities 里的 WifiInfo；再退到 WifiManager（31 起已废弃）
+        val raw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (caps.transportInfo as? WifiInfo)?.ssid
+        } else {
+            null
+        } ?: getSystemService(WifiManager::class.java)?.connectionInfo?.ssid
+        raw?.removeSurrounding("\"")
+            ?.takeIf { it.isNotEmpty() && it != WifiManager.UNKNOWN_SSID }
+    }.getOrNull()
+
+    /** Wi-Fi 条件不满足时的具体原因，给通知栏 headline 用。 */
+    private fun wifiHint(): String {
+        val target = settings.current.wakeWifiSsid.trim().removeSurrounding("\"")
+        if (target.isEmpty()) return "仅 Wi-Fi 下监听，当前不在 Wi-Fi"
+        if (!onWifiTransport()) return "仅「$target」下监听，当前不在 Wi-Fi"
+        val current = currentWifiSsid()
+            ?: return "仅「$target」下监听，读不到 Wi-Fi 名（检查权限，12 及以下还要开系统定位）"
+        return "仅「$target」下监听，当前在「$current」"
+    }
 
     private fun isWithinTimeWindow(snapshot: PiSettings): Boolean {
         val start = snapshot.wakeStartHour

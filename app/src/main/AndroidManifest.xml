@@ -6,6 +6,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- 读当前 Wi-Fi 名（SSID）用于「仅指定 Wi-Fi 下监听」，双轨声明：
+         · 13+：授权「附近设备」即可（neverForLocation，全程不碰定位）
+         · 12 及以下：只能用定位权限，且系统定位开关要打开，
+           否则系统一律只回 <unknown ssid>，读不到名字 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
     <!-- 语音：录音 + 常驻麦克风的前台服务 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

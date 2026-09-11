@@ -1,6 +1,7 @@
 package com.pi.assistant.ui.settings
 
 import android.Manifest
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -80,6 +81,21 @@ fun SettingsScreen(
             viewModel.setWakeEnabled(true)
         } else {
             Toast.makeText(context, "没有录音权限，唤醒开不了", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 读 Wi-Fi 名用的权限：13+「附近设备」，12- 定位（ViewModel 里按版本给）
+    var wifiNameGranted by remember { mutableStateOf(viewModel.hasWifiNamePermission) }
+    val wifiNamePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        wifiNameGranted = granted
+        if (!granted) {
+            Toast.makeText(
+                context,
+                "没有权限就读不到 Wi-Fi 名，指定 Wi-Fi 条件不会满足",
+                Toast.LENGTH_SHORT,
+            ).show()
         }
     }
 
@@ -459,8 +475,37 @@ fun SettingsScreen(
             SwitchRow(
                 label = "仅连 Wi-Fi 时监听",
                 checked = draft.wakeOnlyWifi,
-                onToggle = { viewModel.toggleWakeWifi() },
+                onToggle = { next ->
+                    viewModel.toggleWakeWifi()
+                    // 已填了指定 SSID 才需要权限（任意 Wi-Fi 只看传输层，不碰权限）
+                    if (next && draft.wakeWifiSsid.isNotBlank() && !wifiNameGranted) {
+                        wifiNamePermissionLauncher.launch(viewModel.wifiNamePermission)
+                    }
+                },
             )
+
+            Field(
+                value = draft.wakeWifiSsid,
+                onValueChange = viewModel::updateWakeWifiSsid,
+                label = "Wi-Fi 名称（SSID）",
+                placeholder = "留空 = 任意 Wi-Fi",
+                hint = "填了就只在这个 Wi-Fi 下监听，名字要和路由器上的一致（忽略大小写）。" +
+                    "读 Wi-Fi 名需要权限：" +
+                    if (Build.VERSION.SDK_INT >= 33) "Android 13+ 授权「附近设备」即可"
+                    else "12 及以下要定位权限，且系统定位开关得开着",
+            )
+
+            if (draft.wakeOnlyWifi && draft.wakeWifiSsid.isNotBlank() && !wifiNameGranted) {
+                OutlinedButton(
+                    onClick = { wifiNamePermissionLauncher.launch(viewModel.wifiNamePermission) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        if (Build.VERSION.SDK_INT >= 33) "授权「附近设备」权限（读取 Wi-Fi 名）"
+                        else "授权定位权限（读取 Wi-Fi 名）"
+                    )
+                }
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Field(

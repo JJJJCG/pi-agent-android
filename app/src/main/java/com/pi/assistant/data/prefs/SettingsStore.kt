@@ -93,6 +93,8 @@ data class PiSettings(
     val kwsThreads: Int = 1,
     val wakeOnlyCharging: Boolean = false,
     val wakeOnlyWifi: Boolean = false,
+    /** 指定 Wi-Fi 名（SSID）。留空 = 任意 Wi-Fi；填了则只在连上这个 Wi-Fi 时监听。 */
+    val wakeWifiSsid: String = "",
     val wakeStartHour: Int = HOUR_ANY,
     val wakeEndHour: Int = HOUR_ANY,
 

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings as AndroidSettings
 import androidx.core.content.ContextCompat
@@ -84,6 +85,7 @@ data class SettingsDraft(
     val kwsThreads: String = "1",
     val wakeOnlyCharging: Boolean = false,
     val wakeOnlyWifi: Boolean = false,
+    val wakeWifiSsid: String = "",
     val wakeStartHour: String = PiSettings.HOUR_ANY.toString(),
     val wakeEndHour: String = PiSettings.HOUR_ANY.toString(),
 
@@ -203,6 +205,7 @@ class SettingsViewModel @Inject constructor(
     fun updateKwsThreads(value: String) = mutate { it.copy(kwsThreads = value.digits(1)) }
     fun toggleWakeCharging() = mutate { it.copy(wakeOnlyCharging = !it.wakeOnlyCharging) }
     fun toggleWakeWifi() = mutate { it.copy(wakeOnlyWifi = !it.wakeOnlyWifi) }
+    fun updateWakeWifiSsid(value: String) = mutate { it.copy(wakeWifiSsid = value) }
     fun toggleHideRecents() = mutate { it.copy(hideRecents = !it.hideRecents) }
     fun updateWakeStart(value: String) = mutate { it.copy(wakeStartHour = value) }
     fun updateWakeEnd(value: String) = mutate { it.copy(wakeEndHour = value) }
@@ -256,6 +259,8 @@ class SettingsViewModel @Inject constructor(
                 kwsThreads = draft.kwsThreads.toIntOrNull()?.coerceIn(1, 4) ?: 1,
                 wakeOnlyCharging = draft.wakeOnlyCharging,
                 wakeOnlyWifi = draft.wakeOnlyWifi,
+                // 容错：用户从 Wi-Fi 详情页复制过来可能自带引号
+                wakeWifiSsid = draft.wakeWifiSsid.trim().removeSurrounding("\"").trim(),
                 wakeStartHour = draft.wakeStartHour.toIntOrNull() ?: PiSettings.HOUR_ANY,
                 wakeEndHour = draft.wakeEndHour.toIntOrNull() ?: PiSettings.HOUR_ANY,
                 hideRecents = draft.hideRecents,
@@ -378,7 +383,13 @@ class SettingsViewModel @Inject constructor(
             saveAll(showToast = false)
             settings.updateWakeEnabled(true)
             WakeWordService.start(context)
-            _toast.value = "已开启唤醒，麦克风将常驻采集"
+            val wakeSaved = settings.current
+            _toast.value =
+                if (wakeSaved.wakeOnlyWifi && wakeSaved.wakeWifiSsid.isNotBlank() && !hasWifiNamePermission) {
+                    "已开启唤醒，但读不到 Wi-Fi 名（缺权限），指定 Wi-Fi 条件不会满足"
+                } else {
+                    "已开启唤醒，麦克风将常驻采集"
+                }
         } else {
             settings.updateWakeEnabled(false)
             WakeWordService.stop(context)
@@ -451,6 +462,7 @@ private fun PiSettings.toDraft(): SettingsDraft = SettingsDraft(
     kwsThreads = kwsThreads.toString(),
     wakeOnlyCharging = wakeOnlyCharging,
     wakeOnlyWifi = wakeOnlyWifi,
+    wakeWifiSsid = wakeWifiSsid,
     wakeStartHour = wakeStartHour.toString(),
     wakeEndHour = wakeEndHour.toString(),
     hideRecents = hideRecents,
