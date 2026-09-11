@@ -172,6 +172,21 @@ class SettingsViewModel @Inject constructor(
             pm?.isIgnoringBatteryOptimizations(context.packageName)?.not() ?: false
         }.getOrDefault(false)
 
+    /**
+     * 读 Wi-Fi 名要的运行时权限，双轨（见 Manifest 注释）：
+     * 13+ 是「附近设备」（neverForLocation，不碰定位），12 及以下是定位。
+     */
+    val wifiNamePermission: String
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            Manifest.permission.ACCESS_FINE_LOCATION
+        }
+
+    val hasWifiNamePermission: Boolean
+        get() = ContextCompat.checkSelfPermission(context, wifiNamePermission) ==
+            PackageManager.PERMISSION_GRANTED
+
     // ------------------------------------------------------------ 字段更新
 
     fun updateBaseUrl(value: String) = mutate { it.copy(baseUrl = value) }
